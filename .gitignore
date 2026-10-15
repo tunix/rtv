@@ -1,3 +1,6 @@
 /target
 /dist
 *.gresource
+/flatpak-build
+/.flatpak-builder
+/.venv-flatpak

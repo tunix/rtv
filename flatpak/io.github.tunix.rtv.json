@@ -1,0 +1,50 @@
+{
+  "id": "io.github.tunix.rtv",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "49",
+  "sdk": "org.gnome.Sdk",
+  "sdk-extensions": [
+    "org.freedesktop.Sdk.Extension.rust-stable"
+  ],
+  "command": "rtv",
+  "finish-args": [
+    "--share=network",
+    "--share=ipc",
+    "--socket=fallback-x11",
+    "--socket=wayland",
+    "--device=dri",
+    "--socket=pulse",
+    "--talk-name=org.freedesktop.secrets"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin",
+    "env": {
+      "CARGO_HOME": "/run/build/rtv/cargo"
+    }
+  },
+  "modules": [
+    {
+      "name": "rtv",
+      "buildsystem": "simple",
+      "build-commands": [
+        "cargo --offline build --release --locked",
+        "install -Dm0755 target/release/rtv -t /app/bin/",
+        "install -Dm0644 data/io.github.tunix.rtv.desktop.in /app/share/applications/io.github.tunix.rtv.desktop",
+        "install -Dm0644 data/io.github.tunix.rtv.metainfo.xml -t /app/share/metainfo/",
+        "install -Dm0644 data/io.github.tunix.rtv.gschema.xml -t /app/share/glib-2.0/schemas/",
+        "glib-compile-schemas /app/share/glib-2.0/schemas",
+        "install -Dm0644 data/icons/hicolor/scalable/apps/io.github.tunix.rtv.svg /app/share/icons/hicolor/scalable/apps/io.github.tunix.rtv.svg",
+        "install -Dm0644 data/icons/hicolor/128x128/apps/io.github.tunix.rtv.png /app/share/icons/hicolor/128x128/apps/io.github.tunix.rtv.png",
+        "install -Dm0644 data/icons/hicolor/256x256/apps/io.github.tunix.rtv.png /app/share/icons/hicolor/256x256/apps/io.github.tunix.rtv.png",
+        "install -Dm0644 data/icons/hicolor/512x512/apps/io.github.tunix.rtv.png /app/share/icons/hicolor/512x512/apps/io.github.tunix.rtv.png"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": ".."
+        },
+        "generated-sources.json"
+      ]
+    }
+  ]
+}
