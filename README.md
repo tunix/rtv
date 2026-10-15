@@ -44,6 +44,45 @@ sudo dnf install -y rust cargo rustfmt clippy gcc pkgconf-pkg-config \
 cargo run
 ```
 
+## Flatpak
+
+Every release ships ready-to-install `.flatpak` bundles (x86_64 and
+aarch64), built in CI from [`flatpak/io.github.tunix.rtv.json`](flatpak/io.github.tunix.rtv.json)
+on the GNOME 49 runtime. Grab one from the
+[releases page](https://github.com/tunix/rtv/releases) and install:
+
+```sh
+flatpak install ./rtv-<tag>-x86_64.flatpak
+```
+
+The bundle references its runtime, so the GNOME 49 platform is pulled
+from Flathub automatically on first install.
+
+To install from the self-hosted repo instead (automatic updates included):
+
+```sh
+flatpak remote-add --if-not-exists tunix https://tunix.github.io/flatpak/tunix.flatpakrepo
+flatpak install tunix io.github.tunix.rtv
+```
+
+To build the bundle locally:
+
+```sh
+# regenerate the vendored-crate source list from Cargo.lock
+python3 flatpak/flatpak-cargo-generator.py Cargo.lock \
+    -o flatpak/generated-sources.json
+
+# build (offers to install the GNOME 49 Sdk and the rust-stable
+# extension on first run)
+flatpak-builder --force-clean --user --default-branch=stable \
+    --repo=flatpak-repo flatpak-build flatpak/io.github.tunix.rtv.json
+
+# optional: single-file bundle to share or install
+flatpak build-bundle \
+    --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo \
+    flatpak-repo rtv.flatpak io.github.tunix.rtv stable
+```
+
 ## Settings
 
 Stored in GSettings (`gsettings list-recursively io.github.tunix.rtv`).

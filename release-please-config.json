@@ -4,7 +4,9 @@
   "draft": true,
   "packages": {
     ".": {
-      "package-name": "rtv"
+      "package-name": "rtv",
+      "include-component-in-tag": false
     }
-  }
+  },
+  "force-tag-creation": true
 }

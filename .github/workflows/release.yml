@@ -1,3 +1,14 @@
+# Concurrency: serialize whole release runs. Without this, a push landing
+# while an earlier run is still building artifacts can interleave with the
+# run that still holds an unpublished DRAFT release; release-please only
+# sees PUBLISHED releases when deciding whether a new release is due, so an
+# overlapping run while the draft is not yet published makes it re-package
+# the SAME commits as the next version (valhalla hit this — a spurious
+# release whose changelog was a byte-for-byte copy of the previous one).
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 name: Release
 
 on:
@@ -21,16 +32,29 @@ jobs:
   release-please:
     name: Release please
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     # Nothing to do on a manual dispatch; skip it to save a run.
     if: github.event_name != 'workflow_dispatch'
     steps:
+      # NOTE: deliberately no `release-type` input here. Setting it switches
+      # the action to its Manifest.fromConfig() code path, which ignores
+      # release-please-config.json (repo root) entirely — including
+      # "draft": true — so the release is created PUBLISHED (immutable) and
+      # the later artifact uploads fail with "Cannot upload asset ... to an
+      # immutable release". Without the input the action reads the config
+      # file itself (DEFAULT_CONFIG_FILE = 'release-please-config.json',
+      # i.e. at the repo ROOT, not under .github/).
+      # force-tag-creation (set in release-please-config.json): draft releases
+      # carry no tag ref, so without it release-please's version discovery
+      # cannot see the pending draft — the next run then re-opened the SAME
+      # commits as a new version PR. With it, the tag ref exists at
+      # release-PR merge time, discovery finds it, and re-runs while the
+      # draft waits for artifacts are a no-op.
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
-        with:
-          release-type: rust
 
   artifacts:
     name: Package release artifacts (${{ matrix.arch }})
@@ -49,6 +73,8 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     container: fedora:latest
+    # Baseline ~6 min (dnf + cargo build --release).
+    timeout-minutes: 20
     env:
       TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
       ARCH: ${{ matrix.arch }}
@@ -78,20 +104,87 @@ jobs:
           tar -czf "rtv-${TAG}-${ARCH}.tar.gz" "rtv-${TAG}"
 
       # The release is created as a draft by release-please (see
-      # .github/release-please-config.json): uploads must happen before
+      # release-please-config.json at the repo root): uploads must happen before
       # publication because immutable releases reject late asset uploads.
       - name: Upload release artifacts
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        env:
+          TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
         with:
-          tag_name: ${{ env.TAG }}
+          tag_name: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
           draft: true
           files: rtv-*-${{ matrix.arch }}.tar.gz
 
+  flatpak:
+    name: Flatpak bundle (${{ matrix.arch }})
+    needs: release-please
+    if: >-
+      always() &&
+      (needs.release-please.outputs.release_created == 'true' ||
+       github.event_name == 'workflow_dispatch')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # The runner image no longer ships flatpak-builder. This image owns the
+    # whole toolchain: flatpak, flatpak-builder and the preconfigured flathub
+    # remote. It is multi-arch (amd64 + arm64), so the arm64 job runs its
+    # native variant; --privileged is required for flatpak's sandboxing
+    # during builds.
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-49
+      options: --privileged
+    # Baseline ~7 min; flatpak-builder does a full sandboxed toolchain build.
+    timeout-minutes: 25
+    env:
+      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Keep the vendor list in lockstep with Cargo.lock: regenerate it from
+      # the lockfile on every run instead of trusting a committed copy that
+      # renovate can silently strand behind. The generator script is pinned
+      # in-repo (flatpak/) so the source list stays deterministic.
+      - name: Regenerate cargo vendor sources from Cargo.lock
+        run: |
+          python3 -m venv .venv-flatpak
+          .venv-flatpak/bin/pip install -q 'aiohttp<4.0.0,>=3.9.5' 'PyYAML<7.0.0,>=6.0.2' 'tomlkit>=0.13.3,<1.0'
+          .venv-flatpak/bin/python flatpak/flatpak-cargo-generator.py Cargo.lock \
+            -o flatpak/generated-sources.json
+
+      - name: Build flatpak bundle
+        uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # master @ 7932741 (node24)
+        with:
+          bundle: rtv-${{ env.TAG }}-${{ matrix.arch }}.flatpak
+          manifest-path: flatpak/io.github.tunix.rtv.json
+          arch: ${{ matrix.arch }}
+          branch: stable
+          cache-key: flatpak-builder-${{ github.sha }}
+
+      # The release is a draft while artifacts build; bundles attach alongside
+      # the tarballs before publish flips the draft (immutable releases reject
+      # late asset uploads).
+      - name: Attach bundle to the draft release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        env:
+          # Dispatch runs skip release-please; inputs.tag must win there.
+          TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+        with:
+          tag_name: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+          draft: true
+          files: rtv-*-${{ matrix.arch }}.flatpak
+
   publish:
     name: Publish release
-    needs: [release-please, artifacts]
-    if: always() && needs.artifacts.result == 'success'
+    needs: [release-please, artifacts, flatpak]
+    if: always() && needs.artifacts.result == 'success' && needs.flatpak.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
     steps:
@@ -101,16 +194,136 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          RELEASE_ID=$(curl -sSf -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=20" \
-            | jq -r '[.[] | select(.draft)][0].id // empty')
+          AUTH="Authorization: Bearer ${GITHUB_TOKEN}"
+          BASE="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+
+          # Prefer the draft matching this tag; fall back to the published
+          # release by tag (a draft does not create the tag ref, so a 404 on
+          # the tag endpoint does NOT mean the release is missing).
+          RELEASE_ID=$(curl -sSf -H "$AUTH" \
+            "${BASE}/releases?per_page=100" \
+            | jq -r --arg tag "${TAG}" '[.[] | select(.draft and .tag_name == $tag)][0].id // empty')
+
           if [ -z "${RELEASE_ID}" ]; then
-            RELEASE_ID=$(curl -sSf -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
-              | jq -r '.id')
+            # No matching draft: either already published or never created.
+            HTTP=$(curl -sS -o /tmp/rel.json -w '%{http_code}' -H "$AUTH" \
+              "${BASE}/releases/tags/${TAG}")
+            if [ "${HTTP}" = "200" ] && [ "$(jq -r '.draft' /tmp/rel.json)" = "false" ]; then
+              echo "Release ${TAG} is already published - nothing to do."
+              exit 0
+            fi
+            if [ "${HTTP}" = "404" ]; then
+              echo "WARNING: no draft and no published release for ${TAG} - nothing to publish."
+              exit 0
+            fi
+            echo "ERROR: unexpected HTTP ${HTTP} looking up ${TAG}:" >&2
+            cat /tmp/rel.json >&2
+            exit 1
           fi
-          curl -sSf -X PATCH \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
-            -d '{"draft": false}' > /dev/null
+
+          HTTP=$(curl -sS -o /tmp/pub.json -w '%{http_code}' -X PATCH \
+            -H "$AUTH" \
+            "${BASE}/releases/${RELEASE_ID}" \
+            -d '{"draft": false}')
+          if [ "${HTTP}" != "200" ]; then
+            echo "ERROR: PATCH ${RELEASE_ID} failed with HTTP ${HTTP}:" >&2
+            cat /tmp/pub.json >&2
+            exit 1
+          fi
           echo "Release ${TAG} published"
+
+  notify-flatpak-repo:
+    # Tell tunix/flatpak to rebuild this app into the self-hosted OSTree repo
+    # (tunix.github.io/flatpak). Runs after publish so the tag is final.
+    name: Trigger tunix/flatpak update
+    # release-please must be in the needs closure for its tag_name output to
+    # be readable here; publish alone yields an empty tag in the payload.
+    needs: [publish, release-please]
+    if: always() && needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
+        with:
+          token: ${{ secrets.FLATPAK_REPO_TOKEN }}
+          repository: tunix/flatpak
+          event-type: app-released
+          client-payload: |
+            {
+              "app_id": "io.github.tunix.rtv",
+              "tag": "${{ inputs.tag || needs.release-please.outputs.tag_name }}"
+            }
+
+  guard:
+    # release-please computes the next release from the last PUBLISHED
+    # release. While a draft is still waiting for artifacts, it will happily
+    # open a NEW release PR packaging the SAME commits as the next version —
+    # that is how the spurious duplicate release PR appeared in valhalla:
+    # its changelog was a byte-for-byte copy of the previous release's,
+    # commit SHAs included. Such a PR is never mergeable content, so close
+    # it automatically once the real release is published.
+    name: Close duplicate release PR
+    needs: [release-please, publish]
+    # Only relevant when this run actually published a release.
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TAG: ${{ needs.release-please.outputs.tag_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Sweep duplicate release PRs created while the draft was open
+        run: |
+          set -euo pipefail
+          BASE="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+
+          python3 - "${BASE}" "${TAG}" <<'PY'
+          import base64, json, os, re, sys, urllib.request
+
+          base, tag = sys.argv[1], sys.argv[2]
+          HEADERS = {"Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                     "Accept": "application/vnd.github+json",
+                     "Content-Type": "application/json"}
+
+          def api(path, payload=None):
+              data = json.dumps(payload).encode() if payload is not None else None
+              req = urllib.request.Request(base + path, data=data,
+                  method="PATCH" if payload is not None else "GET", headers=HEADERS)
+              return json.load(urllib.request.urlopen(req))
+
+          # SHAs of the commits listed under the tag we just published, from
+          # the changelog on main (post-merge of THIS release PR).
+          def section_shas(text, heading_re):
+              m = re.search(heading_re, text)
+              if not m:
+                  return set()
+              rest = text[m.end():]
+              nxt = re.search(r"(?m)^## \[", rest)
+              body = rest[: nxt.start()] if nxt else rest
+              clean = re.sub(r"(?m)^\+", "", body)
+              return set(re.findall(r"\[([0-9a-f]{7,40})\]\(https://github\.com/", clean))
+
+          changelog = api("/contents/CHANGELOG.md?ref=main")
+          changelog_text = base64.b64decode(changelog["content"]).decode()
+          # The changelog heading uses the bare version ("## [0.3.0](...)"),
+          # not the tag name; TAG may arrive as "rtv-v0.3.0" or bare "v0.3.0".
+          version = tag.rsplit("v", 1)[-1]
+          shas = section_shas(changelog_text,
+                              re.compile(r"(?m)^## \[" + re.escape(version) + r"\]"))
+
+          for pr in api("/pulls?state=open&per_page=100"):
+              if not re.match(r"^chore\(main\): release ", pr["title"]):
+                  continue
+              # Duplicate signature: its changelog lists EXACTLY the commits
+              # of the release we just published (no new work at all).
+              # Diff patches prefix changed lines with '+' — strip it and
+              # match the added section heading accordingly.
+              files = api(f"/pulls/{pr['number']}/files")
+              head = next((f for f in files if f["filename"] == "CHANGELOG.md"), None)
+              pr_shas = section_shas(head["patch"], re.compile(r"(?m)^\+## \[")) if head else set()
+              if shas and pr_shas == shas:
+                  print(f"Closing duplicate release PR #{pr['number']}: {pr['title']} (same commit set as published {tag})")
+                  print("  ->", api(f"/pulls/{pr['number']}", {"state": "closed"})["state"])
+              else:
+                  print(f"Keeping PR #{pr['number']} ({pr['title']}): commit set differs from {tag} — looks like real work")
+          PY
