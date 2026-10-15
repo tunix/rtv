@@ -3,7 +3,7 @@ use gtk::{gio, glib};
 
 /// Static (blueprint) channel row: name, its heart button, category group.
 #[derive(Debug)]
-pub struct ChannelRow {
+pub struct ContentRow {
     row: gtk::ListBoxRow,
     name: String,
     heart: gtk::Button,
@@ -30,7 +30,7 @@ mod imp {
     use gtk::{glib, TemplateChild};
     use std::cell::{Cell, RefCell};
 
-    use super::{ChannelRow, HeaderRow};
+    use super::{ContentRow, HeaderRow};
 
     #[derive(Debug, Default, gtk::CompositeTemplate)]
     #[template(resource = "/io/github/tunix/rtv/window.ui")]
@@ -56,7 +56,7 @@ mod imp {
         #[template_child]
         pub favorites_list: TemplateChild<gtk::ListBox>,
         #[template_child]
-        pub channel_list: TemplateChild<gtk::ListBox>,
+        pub content_list: TemplateChild<gtk::ListBox>,
         #[template_child]
         pub player_headerbar: TemplateChild<adw::HeaderBar>,
         #[template_child]
@@ -80,9 +80,19 @@ mod imp {
         #[template_child]
         pub fullscreen_button: TemplateChild<gtk::Button>,
         #[template_child]
-        pub channel_title: TemplateChild<gtk::Label>,
+        pub player_box: TemplateChild<gtk::Box>,
         #[template_child]
-        pub channel_status: TemplateChild<gtk::Label>,
+        pub content_info_row: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub live_badge: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub content_stack: TemplateChild<gtk::Stack>,
+        #[template_child]
+        pub content_grid: TemplateChild<gtk::FlowBox>,
+        #[template_child]
+        pub content_title: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub content_status: TemplateChild<gtk::Label>,
 
         /// UI-mock state.
         pub playing: Cell<bool>,
@@ -93,13 +103,19 @@ mod imp {
         pub current: RefCell<Option<String>>,
         pub collapsed: RefCell<Vec<bool>>,
         pub query: RefCell<String>,
-        pub channels: RefCell<Vec<ChannelRow>>,
+        pub channels: RefCell<Vec<ContentRow>>,
         pub headers: RefCell<Vec<HeaderRow>>,
         pub dropdown: RefCell<Option<gtk::DropDown>>,
         /// Bumped on every show/cancel; only the timer matching the latest
         /// generation may hide the controls (stale timers must no-op, since
         /// `SourceId::remove` panics on already-fired ids).
         pub controls_generation: Cell<u64>,
+        /// Sidebar category currently shown in the middle (-1 = none).
+        pub selected_category: Cell<i32>,
+        /// Last pointer position inside the player, for real-movement
+        /// detection (stationary-pointer motion events must not re-reveal
+        /// the auto-hidden controls).
+        pub last_pointer: Cell<(f64, f64)>,
     }
 
     #[glib::object_subclass]
@@ -133,6 +149,7 @@ impl Window {
 
         window.setup_actions();
         window.setup_browse();
+        window.imp().selected_category.set(-1);
         window
     }
 
@@ -273,7 +290,7 @@ impl Window {
 
         // Classify the static rows: category headers vs channel rows.
         let mut group: i32 = -1;
-        let mut child = imp.channel_list.first_child();
+        let mut child = imp.content_list.first_child();
         while let Some(widget) = child {
             child = widget.next_sibling();
             let Some(row) = widget.downcast_ref::<gtk::ListBoxRow>() else {
@@ -298,7 +315,13 @@ impl Window {
                 let gesture = gtk::GestureClick::new();
                 gesture.connect_pressed(move |_, _, _, _| {
                     if let Some(win) = win.upgrade() {
-                        win.toggle_group(group);
+                        // First click selects the category (grid in the
+                        // middle); clicking the selected one toggles it.
+                        if win.imp().selected_category.get() == group {
+                            win.toggle_group(group);
+                        } else {
+                            win.select_category(group);
+                        }
                     }
                 });
                 row.add_controller(gesture);
@@ -317,7 +340,7 @@ impl Window {
                         win.toggle_fav(&closure_name);
                     }
                 });
-                imp.channels.borrow_mut().push(ChannelRow {
+                imp.channels.borrow_mut().push(ContentRow {
                     row: row.clone(),
                     name,
                     heart,
@@ -328,7 +351,7 @@ impl Window {
 
         // Channel activation -> full-window player.
         let win = self.downgrade();
-        imp.channel_list.connect_row_activated(move |_, row| {
+        imp.content_list.connect_row_activated(move |_, row| {
             if let Some(win) = win.upgrade() {
                 if let Some(name) = row_label(row) {
                     win.play(&name);
@@ -405,30 +428,70 @@ impl Window {
             }
         });
 
+        // Category selection -> content grid in the middle.
+        let win = self.downgrade();
+        imp.content_grid.connect_child_activated(move |_, child| {
+            if let Some(win) = win.upgrade() {
+                if let Some(b) = child.child().and_downcast::<gtk::Box>() {
+                    if let Some(name) = first_label(&b) {
+                        win.play(&name);
+                    }
+                }
+            }
+        });
+
         // Mouse movement over the player reveals auto-hidden controls.
+        // Real movement only: the sub-pixel "motion" events GTK emits when
+        // overlay widgets reallocate under a stationary pointer must not
+        // re-reveal the controls (they caused a show/hide flap).
         let motion = gtk::EventControllerMotion::new();
         let win = self.downgrade();
-        motion.connect_motion(move |_, _, _| {
+        motion.connect_motion(move |_, x, y| {
             if let Some(win) = win.upgrade() {
                 let i = win.imp();
-                if i.playing.get() && i.on_player.get() {
+                let (lx, ly) = i.last_pointer.get();
+                let moved = (x - lx).abs() > 2.0 || (y - ly).abs() > 2.0;
+                i.last_pointer.set((x, y));
+                if moved && i.playing.get() && i.on_player.get() {
                     win.show_controls();
                 }
             }
         });
+        let win = self.downgrade();
+        motion.connect_enter(move |_, x, y| {
+            if let Some(win) = win.upgrade() {
+                win.imp().last_pointer.set((x, y));
+            }
+        });
         imp.player_content.add_controller(motion);
 
-        // The fullscreen icon and headerbar visibility follow the real
-        // window state: in fullscreen the player is chrome-free.
+        // The fullscreen icon and chrome visibility follow the real window
+        // state. Fullscreen means PURE video: no headerbar, no info row, no
+        // LIVE badge, no margins or rounded corners — chrome comes back
+        // together with the controls on mouse movement.
         self.connect_fullscreened_notify(|win| {
             let i = win.imp();
-            i.fullscreen_button.set_icon_name(if win.is_fullscreen() {
+            let fullscreen = win.is_fullscreen();
+            i.fullscreen_button.set_icon_name(if fullscreen {
                 "view-restore-symbolic"
             } else {
                 "view-fullscreen-symbolic"
             });
-            i.player_headerbar.set_visible(!win.is_fullscreen());
-            if win.is_fullscreen() {
+            i.player_headerbar.set_visible(!fullscreen);
+            i.content_info_row.set_visible(!fullscreen);
+            i.live_badge.set_visible(!fullscreen);
+            let margin = if fullscreen { 0 } else { 12 };
+            i.player_content.set_margin_start(margin);
+            i.player_content.set_margin_end(margin);
+            i.player_content.set_margin_bottom(margin);
+            i.player_content
+                .set_spacing(if fullscreen { 0 } else { 12 });
+            if fullscreen {
+                i.player_box.add_css_class("video-fill");
+            } else {
+                i.player_box.remove_css_class("video-fill");
+            }
+            if fullscreen {
                 win.show_controls();
             }
         });
@@ -583,8 +646,8 @@ impl Window {
         let imp = self.imp();
         *imp.current.borrow_mut() = Some(name.to_string());
         imp.player_page.set_title(name);
-        imp.channel_title.set_label(name);
-        imp.channel_status.set_label("Live · 1080p");
+        imp.content_title.set_label(name);
+        imp.content_status.set_label("Live · 1080p");
         imp.playing.set(false);
         self.set_play_icon(false);
         let is_fav = imp.favorites.borrow().iter().any(|n| n == name);
@@ -598,7 +661,7 @@ impl Window {
         let imp = self.imp();
         imp.playing.set(!imp.playing.get());
         self.set_play_icon(imp.playing.get());
-        imp.channel_status.set_label(if imp.playing.get() {
+        imp.content_status.set_label(if imp.playing.get() {
             "Playing (mock)"
         } else {
             "Live · 1080p"
@@ -629,6 +692,9 @@ impl Window {
         let generation = imp.controls_generation.get() + 1;
         imp.controls_generation.set(generation);
         imp.controls_revealer.set_reveal_child(true);
+        if self.is_fullscreen() {
+            imp.live_badge.set_visible(true);
+        }
         if imp.playing.get() && imp.on_player.get() {
             let win = self.downgrade();
             glib::timeout_add_seconds_local(3, move || {
@@ -636,6 +702,9 @@ impl Window {
                     let i = win.imp();
                     if i.controls_generation.get() == generation {
                         i.controls_revealer.set_reveal_child(false);
+                        if win.is_fullscreen() {
+                            i.live_badge.set_visible(false);
+                        }
                     }
                 }
                 glib::ControlFlow::Break
@@ -648,6 +717,27 @@ impl Window {
         let imp = self.imp();
         imp.controls_generation
             .set(imp.controls_generation.get() + 1);
+    }
+
+    /// Show a category's content as a card grid in the middle pane.
+    fn select_category(&self, group: i32) {
+        let imp = self.imp();
+        imp.selected_category.set(group);
+
+        while let Some(child) = imp.content_grid.first_child() {
+            imp.content_grid.remove(&child);
+        }
+        for c in imp.channels.borrow().iter() {
+            if c.group == group {
+                imp.content_grid.append(&content_card(&c.name));
+            }
+        }
+        imp.content_stack.set_visible_child_name("grid");
+
+        // Keep the sidebar in sync: a selected category is expanded.
+        if self.collapsed(group) {
+            self.toggle_group(group);
+        }
     }
 
     fn toggle_mute(&self) {
@@ -695,6 +785,37 @@ fn row_heart(container: &gtk::Box) -> gtk::Button {
 fn row_label(row: &gtk::ListBoxRow) -> Option<String> {
     let container = row.child().and_downcast::<gtk::Box>()?;
     first_label(&container)
+}
+
+fn content_card(name: &str) -> gtk::FlowBoxChild {
+    let art = gtk::Box::builder()
+        .css_classes(["card"])
+        .width_request(150)
+        .height_request(90)
+        .valign(gtk::Align::Center)
+        .build();
+    art.append(
+        &gtk::Image::builder()
+            .icon_name("video-display-symbolic")
+            .pixel_size(56)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .build(),
+    );
+    let label = gtk::Label::builder()
+        .label(name)
+        .wrap(true)
+        .justify(gtk::Justification::Center)
+        .halign(gtk::Align::Center)
+        .max_width_chars(16)
+        .build();
+    let b = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .build();
+    b.append(&art);
+    b.append(&label);
+    gtk::FlowBoxChild::builder().child(&b).build()
 }
 
 fn set_heart_active(button: &gtk::Button, active: bool) {
