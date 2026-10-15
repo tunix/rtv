@@ -96,7 +96,10 @@ mod imp {
         pub channels: RefCell<Vec<ChannelRow>>,
         pub headers: RefCell<Vec<HeaderRow>>,
         pub dropdown: RefCell<Option<gtk::DropDown>>,
-        pub hide_timeout: RefCell<Option<glib::SourceId>>,
+        /// Bumped on every show/cancel; only the timer matching the latest
+        /// generation may hide the controls (stale timers must no-op, since
+        /// `SourceId::remove` panics on already-fired ids).
+        pub controls_generation: Cell<u64>,
     }
 
     #[glib::object_subclass]
@@ -619,26 +622,32 @@ impl Window {
 
     /// Reveal the control bar; while playing, schedule it to fade away
     /// again after a short delay (mouse motion or pause re-reveals).
+    /// Stale timers are neutralized by a generation check instead of
+    /// `SourceId::remove`, which panics on already-fired ids.
     fn show_controls(&self) {
         let imp = self.imp();
-        self.cancel_hide();
+        let generation = imp.controls_generation.get() + 1;
+        imp.controls_generation.set(generation);
         imp.controls_revealer.set_reveal_child(true);
         if imp.playing.get() && imp.on_player.get() {
             let win = self.downgrade();
-            let id = glib::timeout_add_seconds_local(3, move || {
+            glib::timeout_add_seconds_local(3, move || {
                 if let Some(win) = win.upgrade() {
-                    win.imp().controls_revealer.set_reveal_child(false);
+                    let i = win.imp();
+                    if i.controls_generation.get() == generation {
+                        i.controls_revealer.set_reveal_child(false);
+                    }
                 }
                 glib::ControlFlow::Break
             });
-            *imp.hide_timeout.borrow_mut() = Some(id);
         }
     }
 
+    /// Invalidate any pending hide timer without touching its SourceId.
     fn cancel_hide(&self) {
-        if let Some(id) = self.imp().hide_timeout.borrow_mut().take() {
-            id.remove();
-        }
+        let imp = self.imp();
+        imp.controls_generation
+            .set(imp.controls_generation.get() + 1);
     }
 
     fn toggle_mute(&self) {
