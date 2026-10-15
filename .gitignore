@@ -4,3 +4,4 @@
 /flatpak-build
 /.flatpak-builder
 /.venv-flatpak
+__pycache__/
