@@ -28,6 +28,7 @@ fn main() {
 
     // 3. Generate and compile the GResource bundle.
     let icon_dir = manifest.join("data/icons/hicolor/scalable/apps");
+    let hicolor_dir = manifest.join("data/icons/hicolor");
     println!(
         "cargo:rerun-if-changed={}",
         icon_dir.join("io.github.tunix.rtv.svg").display()
@@ -49,7 +50,11 @@ fn main() {
     let gxml = out.join("rtv.gresources.xml");
     fs::write(&gxml, xml).expect("write gresource xml");
 
-    glib_build_tools::compile_resources(&[out, icon_dir], gxml.to_str().unwrap(), "rtv.gresource");
+    glib_build_tools::compile_resources(
+        &[out, icon_dir, hicolor_dir],
+        gxml.to_str().unwrap(),
+        "rtv.gresource",
+    );
 
     // 4. Install the schema into the user schema dir so dev runs (outside
     //    Flatpak) find it via dconf.

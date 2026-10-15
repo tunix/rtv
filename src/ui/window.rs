@@ -42,6 +42,8 @@ mod imp {
         #[template_child]
         pub welcome_page: TemplateChild<adw::NavigationPage>,
         #[template_child]
+        pub welcome_status: TemplateChild<adw::StatusPage>,
+        #[template_child]
         pub browse_page: TemplateChild<adw::NavigationPage>,
         #[template_child]
         pub player_page: TemplateChild<adw::NavigationPage>,
@@ -56,9 +58,15 @@ mod imp {
         #[template_child]
         pub channel_list: TemplateChild<gtk::ListBox>,
         #[template_child]
+        pub player_headerbar: TemplateChild<adw::HeaderBar>,
+        #[template_child]
         pub player_heart: TemplateChild<gtk::Button>,
         #[template_child]
-        pub play_button: TemplateChild<gtk::Button>,
+        pub player_content: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub app_watermark: TemplateChild<gtk::Image>,
+        #[template_child]
+        pub controls_revealer: TemplateChild<gtk::Revealer>,
         #[template_child]
         pub play_button_small: TemplateChild<gtk::Button>,
         #[template_child]
@@ -80,7 +88,7 @@ mod imp {
         pub playing: Cell<bool>,
         pub muted: Cell<bool>,
         pub has_source: Cell<bool>,
-        pub last_selected: Cell<u32>,
+        pub on_player: Cell<bool>,
         pub favorites: RefCell<Vec<String>>,
         pub current: RefCell<Option<String>>,
         pub collapsed: RefCell<Vec<bool>>,
@@ -88,6 +96,7 @@ mod imp {
         pub channels: RefCell<Vec<ChannelRow>>,
         pub headers: RefCell<Vec<HeaderRow>>,
         pub dropdown: RefCell<Option<gtk::DropDown>>,
+        pub hide_timeout: RefCell<Option<glib::SourceId>>,
     }
 
     #[glib::object_subclass]
@@ -167,6 +176,68 @@ impl Window {
         });
         self.add_action(&reset);
 
+        // Classic media-player shortcuts (accelerators registered in app.rs).
+        // They only act while the player page is on screen.
+        let win = self.downgrade();
+        let play_pause = gio::SimpleAction::new("play-pause", None);
+        play_pause.connect_activate(move |_, _| {
+            let Some(win) = win.upgrade() else { return };
+            if win.imp().on_player.get() {
+                win.toggle_playing();
+            }
+        });
+        self.add_action(&play_pause);
+
+        let win = self.downgrade();
+        let seek_back = gio::SimpleAction::new("seek-back", None);
+        seek_back.connect_activate(move |_, _| {
+            let Some(win) = win.upgrade() else { return };
+            if win.imp().on_player.get() {
+                win.toast("Seek back 10s (mock)");
+            }
+        });
+        self.add_action(&seek_back);
+
+        let win = self.downgrade();
+        let seek_forward = gio::SimpleAction::new("seek-forward", None);
+        seek_forward.connect_activate(move |_, _| {
+            let Some(win) = win.upgrade() else { return };
+            if win.imp().on_player.get() {
+                win.toast("Seek forward 10s (mock)");
+            }
+        });
+        self.add_action(&seek_forward);
+
+        let win = self.downgrade();
+        let mute = gio::SimpleAction::new("toggle-mute", None);
+        mute.connect_activate(move |_, _| {
+            let Some(win) = win.upgrade() else { return };
+            if win.imp().on_player.get() {
+                win.toggle_mute();
+            }
+        });
+        self.add_action(&mute);
+
+        let win = self.downgrade();
+        let fullscreen = gio::SimpleAction::new("toggle-fullscreen", None);
+        fullscreen.connect_activate(move |_, _| {
+            let Some(win) = win.upgrade() else { return };
+            if win.imp().on_player.get() {
+                win.toggle_fullscreen();
+            }
+        });
+        self.add_action(&fullscreen);
+
+        let win = self.downgrade();
+        let exit_fullscreen = gio::SimpleAction::new("exit-fullscreen", None);
+        exit_fullscreen.connect_activate(move |_, _| {
+            let Some(win) = win.upgrade() else { return };
+            if win.is_fullscreen() {
+                win.unfullscreen();
+            }
+        });
+        self.add_action(&exit_fullscreen);
+
         let win2 = self.downgrade();
         let about = gio::SimpleAction::new("about", None);
         about.connect_activate(move |_, _| {
@@ -188,28 +259,14 @@ impl Window {
     fn setup_browse(&self) {
         let imp = self.imp();
 
-        // Source picker, valhalla-style, in the header title area.
+        // Source picker, valhalla-style, in the header title area. Switching
+        // is silent for now; real per-source loading arrives with the
+        // source/back-end work.
         let model = gtk::StringList::new(&["Xtream — Home Panel", "M3U — Trial List"]);
         let dropdown = gtk::DropDown::new(Some(model), None::<gtk::Expression>);
         dropdown.set_selected(0);
         imp.dropdown_box.append(&dropdown);
-        imp.dropdown.replace(Some(dropdown.clone()));
-        imp.last_selected.set(0);
-        let win = self.downgrade();
-        dropdown.connect_selected_notify(move |dd| {
-            let Some(win) = win.upgrade() else { return };
-            let sel = dd.selected();
-            // The property also notifies outside user interaction; only
-            // toast genuine switches, and name the ACTUALLY selected item.
-            if sel == win.imp().last_selected.get() {
-                return;
-            }
-            win.imp().last_selected.set(sel);
-            let Some(item) = dd.selected_item().and_downcast::<gtk::StringObject>() else {
-                return;
-            };
-            win.toast(&format!("Source switched (mock): {}", item.string()));
-        });
+        imp.dropdown.replace(Some(dropdown));
 
         // Classify the static rows: category headers vs channel rows.
         let mut group: i32 = -1;
@@ -294,25 +351,23 @@ impl Window {
             }
         });
 
-        // Player controls.
+        // Leaving the player page (back button / pop) resets player state.
         let win = self.downgrade();
-        imp.play_button.connect_clicked(move |_| {
+        imp.main_view.connect_popped(move |_, _| {
+            if let Some(win) = win.upgrade() {
+                let i = win.imp();
+                i.on_player.set(false);
+                win.cancel_hide();
+            }
+        });
+
+        // Player control bar.
+        let win = self.downgrade();
+        imp.play_button_small.connect_clicked(move |_| {
             if let Some(win) = win.upgrade() {
                 win.toggle_playing();
             }
         });
-        let win = self.downgrade();
-        imp.player_heart.connect_clicked(move |_| {
-            if let Some(win) = win.upgrade() {
-                let name = win.imp().current.borrow().clone();
-                if let Some(name) = name {
-                    win.toggle_fav(&name);
-                }
-            }
-        });
-
-        // Player control bar (mock): seek, play/pause, mute, fullscreen.
-        // Volume gets its state from the VolumeButton itself.
         let win = self.downgrade();
         imp.seek_back.connect_clicked(move |_| {
             if let Some(win) = win.upgrade() {
@@ -326,40 +381,53 @@ impl Window {
             }
         });
         let win = self.downgrade();
-        imp.play_button_small.connect_clicked(move |_| {
-            if let Some(win) = win.upgrade() {
-                win.toggle_playing();
-            }
-        });
-        let win = self.downgrade();
         imp.mute_button.connect_clicked(move |_| {
-            let Some(win) = win.upgrade() else { return };
-            let imp = win.imp();
-            imp.muted.set(!imp.muted.get());
-            imp.mute_button.set_icon_name(if imp.muted.get() {
-                "audio-volume-muted-symbolic"
-            } else {
-                "audio-volume-high-symbolic"
-            });
+            if let Some(win) = win.upgrade() {
+                win.toggle_mute();
+            }
         });
         let win = self.downgrade();
         imp.fullscreen_button.connect_clicked(move |_| {
-            let Some(win) = win.upgrade() else { return };
-            if win.is_fullscreen() {
-                win.unfullscreen();
-            } else {
-                win.fullscreen();
+            if let Some(win) = win.upgrade() {
+                win.toggle_fullscreen();
             }
         });
-        // The fullscreen icon follows the real window state.
+        let win = self.downgrade();
+        imp.player_heart.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                let name = win.imp().current.borrow().clone();
+                if let Some(name) = name {
+                    win.toggle_fav(&name);
+                }
+            }
+        });
+
+        // Mouse movement over the player reveals auto-hidden controls.
+        let motion = gtk::EventControllerMotion::new();
+        let win = self.downgrade();
+        motion.connect_motion(move |_, _, _| {
+            if let Some(win) = win.upgrade() {
+                let i = win.imp();
+                if i.playing.get() && i.on_player.get() {
+                    win.show_controls();
+                }
+            }
+        });
+        imp.player_content.add_controller(motion);
+
+        // The fullscreen icon and headerbar visibility follow the real
+        // window state: in fullscreen the player is chrome-free.
         self.connect_fullscreened_notify(|win| {
-            win.imp()
-                .fullscreen_button
-                .set_icon_name(if win.is_fullscreen() {
-                    "view-restore-symbolic"
-                } else {
-                    "view-fullscreen-symbolic"
-                });
+            let i = win.imp();
+            i.fullscreen_button.set_icon_name(if win.is_fullscreen() {
+                "view-restore-symbolic"
+            } else {
+                "view-fullscreen-symbolic"
+            });
+            i.player_headerbar.set_visible(!win.is_fullscreen());
+            if win.is_fullscreen() {
+                win.show_controls();
+            }
         });
 
         self.rebuild_favorites();
@@ -518,7 +586,9 @@ impl Window {
         self.set_play_icon(false);
         let is_fav = imp.favorites.borrow().iter().any(|n| n == name);
         set_heart_active(&imp.player_heart, is_fav);
+        imp.on_player.set(true);
         imp.main_view.push(&*imp.player_page);
+        self.show_controls();
     }
 
     fn toggle_playing(&self) {
@@ -530,28 +600,63 @@ impl Window {
         } else {
             "Live · 1080p"
         });
+        if imp.playing.get() {
+            self.show_controls();
+        } else {
+            self.cancel_hide();
+            imp.controls_revealer.set_reveal_child(true);
+        }
     }
 
-    /// Keep the big centered play button and the bar's play button in sync.
     fn set_play_icon(&self, playing: bool) {
-        let imp = self.imp();
         let icon = if playing {
             "media-playback-pause-symbolic"
         } else {
             "media-playback-start-symbolic"
         };
-        if let Some(img) = imp.play_button.child().and_downcast::<gtk::Image>() {
-            img.set_icon_name(Some(icon));
-        }
-        imp.play_button_small.set_icon_name(icon);
+        self.imp().play_button_small.set_icon_name(icon);
     }
-}
 
-fn set_heart_active(button: &gtk::Button, active: bool) {
-    if active {
-        button.add_css_class("active");
-    } else {
-        button.remove_css_class("active");
+    /// Reveal the control bar; while playing, schedule it to fade away
+    /// again after a short delay (mouse motion or pause re-reveals).
+    fn show_controls(&self) {
+        let imp = self.imp();
+        self.cancel_hide();
+        imp.controls_revealer.set_reveal_child(true);
+        if imp.playing.get() && imp.on_player.get() {
+            let win = self.downgrade();
+            let id = glib::timeout_add_seconds_local(3, move || {
+                if let Some(win) = win.upgrade() {
+                    win.imp().controls_revealer.set_reveal_child(false);
+                }
+                glib::ControlFlow::Break
+            });
+            *imp.hide_timeout.borrow_mut() = Some(id);
+        }
+    }
+
+    fn cancel_hide(&self) {
+        if let Some(id) = self.imp().hide_timeout.borrow_mut().take() {
+            id.remove();
+        }
+    }
+
+    fn toggle_mute(&self) {
+        let imp = self.imp();
+        imp.muted.set(!imp.muted.get());
+        imp.mute_button.set_icon_name(if imp.muted.get() {
+            "audio-volume-muted-symbolic"
+        } else {
+            "audio-volume-high-symbolic"
+        });
+    }
+
+    fn toggle_fullscreen(&self) {
+        if self.is_fullscreen() {
+            self.unfullscreen();
+        } else {
+            self.fullscreen();
+        }
     }
 }
 
@@ -581,4 +686,12 @@ fn row_heart(container: &gtk::Box) -> gtk::Button {
 fn row_label(row: &gtk::ListBoxRow) -> Option<String> {
     let container = row.child().and_downcast::<gtk::Box>()?;
     first_label(&container)
+}
+
+fn set_heart_active(button: &gtk::Button, active: bool) {
+    if active {
+        button.add_css_class("active");
+    } else {
+        button.remove_css_class("active");
+    }
 }
