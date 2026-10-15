@@ -5,3 +5,4 @@
 /.flatpak-builder
 /.venv-flatpak
 __pycache__/
+/samples

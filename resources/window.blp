@@ -62,7 +62,7 @@ template $RtvWindow : Adw.ApplicationWindow {
             min-sidebar-width: 280;
 
             sidebar: Adw.NavigationPage {
-              title: _("Channels");
+              title: _("Content");
 
               child: Gtk.Box {
                 orientation: vertical;
@@ -74,7 +74,7 @@ template $RtvWindow : Adw.ApplicationWindow {
                   margin-top: 6;
                   margin-start: 6;
                   margin-end: 6;
-                  placeholder-text: _("Search channels…");
+                  placeholder-text: _("Search content…");
                 }
 
                 Gtk.Label favorites_title {
@@ -95,7 +95,7 @@ template $RtvWindow : Adw.ApplicationWindow {
                   vexpand: true;
                   hscrollbar-policy: never;
 
-                  child: Gtk.ListBox channel_list {
+                  child: Gtk.ListBox content_list {
                     styles ["navigation-sidebar"]
 
                     Gtk.ListBoxRow {
@@ -364,10 +364,43 @@ template $RtvWindow : Adw.ApplicationWindow {
             content: Adw.NavigationPage {
               title: _("RTV");
 
-              child: Adw.StatusPage {
-                icon-name: "video-display-symbolic";
-                title: _("Nothing selected");
-                description: _("Pick a category in the sidebar, then a channel — it opens full-window here.");
+              child: Gtk.Stack content_stack {
+                transition-type: crossfade;
+                transition-duration: 250;
+
+                Gtk.StackPage {
+                  name: "empty";
+                  child: Adw.StatusPage {
+                    icon-name: "video-display-symbolic";
+                    title: _("Pick a category");
+                    description: _("Choose a category from the sidebar to browse its content here.");
+                  };
+                }
+
+                Gtk.StackPage {
+                  name: "grid";
+                  child: Gtk.ScrolledWindow {
+                    hscrollbar-policy: never;
+
+                    child: Adw.Clamp {
+                      maximum-size: 1000;
+
+                      child: Gtk.FlowBox content_grid {
+                        margin-top: 12;
+                        margin-start: 12;
+                        margin-end: 12;
+                        margin-bottom: 12;
+                        column-spacing: 12;
+                        row-spacing: 12;
+                        min-children-per-line: 3;
+                        max-children-per-line: 5;
+                        activate-on-single-click: true;
+                        selection-mode: none;
+                        valign: start;
+                      };
+                    };
+                  };
+                }
               };
             };
           };
@@ -475,7 +508,7 @@ template $RtvWindow : Adw.ApplicationWindow {
               }
 
               [overlay]
-              Gtk.Label {
+              Gtk.Label live_badge {
                 label: "LIVE";
                 halign: end;
                 valign: start;
@@ -485,18 +518,18 @@ template $RtvWindow : Adw.ApplicationWindow {
               }
             }
 
-            Gtk.Box {
+            Gtk.Box content_info_row {
               spacing: 12;
 
-              Gtk.Label channel_title {
+              Gtk.Label content_title {
                 styles ["title-3"]
-                label: _("Select a channel");
+                label: _("Select content");
                 halign: start;
                 hexpand: true;
                 ellipsize: end;
               }
 
-              Gtk.Label channel_status {
+              Gtk.Label content_status {
                 styles ["dim-label"]
                 label: "—";
                 valign: center;

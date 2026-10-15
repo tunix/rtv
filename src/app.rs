@@ -92,9 +92,11 @@ fn load_css() {
     let css = gtk::CssProvider::new();
     css.load_from_string(concat!(
         ".player { background: #171723; border-radius: 16px; }\n",
+        ".player.video-fill { border-radius: 0; }\n",
         ".heart-btn { opacity: 0.55; }\n",
         ".heart-btn.active { opacity: 1; color: #e01b24; }\n",
         ".controls { background: rgba(23, 23, 35, 0.85); border-radius: 12px; padding: 4px 6px; }\n",
+        ".card { background: rgba(255, 255, 255, 0.06); border-radius: 12px; }\n",
     ));
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(

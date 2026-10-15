@@ -21,6 +21,10 @@ IPTV player for the GNOME desktop. Rust + GTK4/libadwaita, Xtream Codes first, M
 - Never block the UI thread on network I/O: fetches run on the tokio runtime and results reach the UI through channels.
 - UI follows GNOME HIG and stays libadwaita-native (Blueprint templates compiled in build.rs).
 - Iterate on UI mocks in `resources/*.blp` before wiring business logic; empty states must always look intentional.
+- Terminology: the UI says "content", never "channel" (Xtream/M3U carry more than live TV).
+- Loading policy: adding a source shows the UI immediately and streams content in progressively; later launches render from the local cache first and refresh async in the background. Never block the user on loading, but always surface progress.
+- Artwork/covers are cached locally; on any fetch failure use placeholder art, degrade gracefully, and NEVER crash.
+- Xtream categories are flat (parent_id=0) and M3U nests by group-title; the real tree will be modeled after the dumps in `samples/` (gitignored — never commit them, they contain credentials).
 - Stream URLs can expire or 404: re-resolve on failure, surface a toast/banner, never strand the player.
 
 ## Gotchas
