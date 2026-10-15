@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="io.github.tunix.rtv" path="/io/github/tunix/rtv/">
+    <key name="last-source" type="s">
+      <default>"xtream"</default>
+      <summary>Active source</summary>
+      <description>Identifier of the source selected when the app last ran.</description>
+    </key>
+  </schema>
+</schemalist>

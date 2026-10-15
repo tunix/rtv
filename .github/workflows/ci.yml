@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    # Only app-relevant changes need a full CI pass on main. Docs-only
+    # commits (README, AGENTS.md, screenshots, license) skip it; pull
+    # requests always run CI regardless of paths.
+    paths:
+      - "src/**"
+      - "resources/**"
+      - "data/**"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/ci.yml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  checks:
+    name: Build, test, lint
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install toolchain
+        run: >
+          dnf install -y rust cargo rustfmt clippy gcc pkgconf-pkg-config
+          gtk4-devel libadwaita-devel glib2-devel blueprint-compiler git
+
+      - name: Cache cargo artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            /root/.cargo/registry
+            /root/.cargo/git
+          key: fedora-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: fedora-cargo-
+
+      - name: Format check
+        id: fmt
+        run: cargo fmt --check
+
+      - name: Build
+        id: build
+        run: cargo build --locked
+
+      - name: Test
+        id: test
+        run: cargo test
+
+      - name: Clippy
+        id: clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Job summary
+        if: always()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## CI summary
+          | Check | Result |
+          | --- | --- |
+          | rustfmt | ${{ steps.fmt.outcome == 'success' && '✅' || '❌' }} |
+          | build | ${{ steps.build.outcome == 'success' && '✅' || '❌' }} |
+          | test | ${{ steps.test.outcome == 'success' && '✅' || '❌' }} |
+          | clippy | ${{ steps.clippy.outcome == 'success' && '✅' || '❌' }} |
+          EOF
+
+      - name: Summarize on the PR
+        if: github.event_name == 'pull_request' && always()
+        env:
+          FMT: ${{ steps.fmt.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          TEST: ${{ steps.test.outcome }}
+          CLIPPY: ${{ steps.clippy.outcome }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const mark = (o) => (o === 'success' ? '✅' : o === 'skipped' ? '⏭️' : '❌');
+            const sha = context.payload.pull_request.head.sha.substring(0, 7);
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            const body = [
+              `## CI summary (\`${sha}\`)`,
+              '',
+              '| Check | Result |',
+              '| --- | --- |',
+              `| rustfmt | ${mark(process.env.FMT)} |`,
+              `| build | ${mark(process.env.BUILD)} |`,
+              `| test | ${mark(process.env.TEST)} |`,
+              `| clippy | ${mark(process.env.CLIPPY)} |`,
+              '',
+              `[Full run](${runUrl})`,
+              '<!-- rtv-ci-summary -->',
+            ].join('\n');
+            const opts = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            };
+            const { data: comments } = await github.rest.issues.listComments({
+              ...opts,
+              per_page: 100,
+            });
+            const existing = comments.find((c) => c.body?.includes('<!-- rtv-ci-summary -->'));
+            if (existing) {
+              await github.rest.issues.updateComment({ ...opts, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...opts, body });
+            }
+
+  label:
+    name: Label PR
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0

@@ -1,0 +1,57 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $RtvWindow : Adw.ApplicationWindow {
+  title: _("RTV");
+  default-width: 960;
+  default-height: 600;
+  width-request: 360;
+  height-request: 300;
+
+  content: Adw.ToastOverlay toast_overlay {
+    child: Adw.ToolbarView {
+
+      [top]
+      Adw.HeaderBar {
+        [end]
+        Gtk.MenuButton {
+          primary: true;
+          icon-name: "open-menu-symbolic";
+          tooltip-text: _("Main Menu");
+          menu-model: primary_menu;
+        }
+      }
+
+      content: Adw.StatusPage {
+        icon-name: "io.github.tunix.rtv";
+        title: _("No source configured");
+        description: _("Add an Xtream Codes account or an M3U playlist to start watching live TV.");
+
+        child: Gtk.Button add_source_button {
+          label: _("Add source");
+          action-name: "win.add-source";
+          styles ["suggested-action", "pill"]
+        };
+      };
+    };
+  };
+}
+
+menu primary_menu {
+  section {
+    item {
+      label: _("_Add source");
+      action: "win.add-source";
+    }
+  }
+  section {
+    item {
+      label: _("_About RTV");
+      action: "win.about";
+    }
+    item {
+      label: _("_Quit");
+      action: "app.quit";
+    }
+  }
+}
