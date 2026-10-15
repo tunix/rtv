@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.tunix.rtv</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0</project_license>
+  <name>RTV</name>
+  <summary>IPTV player for the GNOME desktop</summary>
+  <description>
+    <p>Watch live TV from Xtream Codes panels and M3U playlists in a native, GNOME-integrated player.</p>
+  </description>
+  <launchable type="desktop-id">io.github.tunix.rtv.desktop</launchable>
+  <url type="homepage">https://github.com/tunix/rtv</url>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.1.0" date="2026-10-15" />
+  </releases>
+</component>

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=RTV
+Comment=IPTV player for the GNOME desktop
+Exec=rtv
+Icon=io.github.tunix.rtv
+Terminal=false
+Type=Application
+Categories=GNOME;GTK;AudioVideo;Video;TV;
+Keywords=iptv;m3u;xtream;tv;channels;player;
+StartupNotify=true

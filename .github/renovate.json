@@ -1,0 +1,33 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:best-practices"],
+  "prHourlyLimit": 10,
+  "prConcurrentLimit": 20,
+  "recreateWhen": "always",
+  "rebaseWhen": "auto",
+  "assignees": ["tunix"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track container images used as workflow job runners",
+      "managerFilePatterns": ["/^\\.github/workflows/.+\\.ya?ml$/"],
+      "matchStrings": ["container:\\s*['\"]?(?<packageName>[^\\s'\"]+):(?<currentValue>[^\\s'\"]+)['\"]?"],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Automerge safe low-risk updates (digest/pin only) when checks pass",
+      "matchUpdateTypes": ["digest", "pin", "pinDigest"],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash"
+    },
+    {
+      "description": "Require human review for GitHub Actions updates — automerged action SHA bumps would run unreviewed code in privileged workflows (packages:write, id-token:write, secrets:inherit). Last matching rule wins, so keep this rule last.",
+      "matchManagers": ["github-actions"],
+      "automerge": false
+    }
+  ]
+}

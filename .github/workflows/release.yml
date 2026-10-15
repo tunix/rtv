@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  # Deliberately NOT path-gated: release-please must observe every merge to
+  # keep the changelog complete, and it is a no-op when no release is due.
+  # The artifacts job only runs when a release is actually created.
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)attach artifacts to"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: Release please
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    # Nothing to do on a manual dispatch; skip it to save a run.
+    if: github.event_name != 'workflow_dispatch'
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+        with:
+          release-type: rust
+
+  artifacts:
+    name: Package release artifacts (${{ matrix.arch }})
+    needs: release-please
+    if: >-
+      always() &&
+      (needs.release-please.outputs.release_created == 'true' ||
+       github.event_name == 'workflow_dispatch')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: fedora:latest
+    env:
+      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install toolchain
+        run: >
+          dnf install -y rust cargo rustfmt clippy gcc pkgconf-pkg-config
+          gtk4-devel libadwaita-devel glib2-devel blueprint-compiler git
+
+      - name: Cache cargo artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            /root/.cargo/registry
+            /root/.cargo/git
+          key: fedora-cargo-${{ matrix.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: fedora-cargo-${{ matrix.arch }}-
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package tarball
+        run: |
+          install -D -m 0755 target/release/rtv "rtv-${TAG}/rtv"
+          tar -czf "rtv-${TAG}-${ARCH}.tar.gz" "rtv-${TAG}"
+
+      # The release is created as a draft by release-please (see
+      # .github/release-please-config.json): uploads must happen before
+      # publication because immutable releases reject late asset uploads.
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ env.TAG }}
+          draft: true
+          files: rtv-*-${{ matrix.arch }}.tar.gz
+
+  publish:
+    name: Publish release
+    needs: [release-please, artifacts]
+    if: always() && needs.artifacts.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || needs.release-please.outputs.tag_name }}
+    steps:
+      # gh release edit always sends tag_name in the PATCH, which immutable
+      # releases reject; publish with a minimal PATCH body instead.
+      - name: Flip the draft release to published
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_ID=$(curl -sSf -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases?per_page=20" \
+            | jq -r '[.[] | select(.draft)][0].id // empty')
+          if [ -z "${RELEASE_ID}" ]; then
+            RELEASE_ID=$(curl -sSf -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
+              | jq -r '.id')
+          fi
+          curl -sSf -X PATCH \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -d '{"draft": false}' > /dev/null
+          echo "Release ${TAG} published"
