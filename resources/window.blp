@@ -29,6 +29,7 @@ template $RtvWindow : Adw.ApplicationWindow {
             child: Gtk.Button add_source_button {
               label: _("Add source…");
               action-name: "win.add-source";
+              halign: center;
               styles ["suggested-action", "pill"]
             };
           };
@@ -418,12 +419,65 @@ template $RtvWindow : Adw.ApplicationWindow {
               }
 
               [overlay]
+              Gtk.Box controls {
+                halign: center;
+                valign: end;
+                margin-bottom: 12;
+                spacing: 6;
+                styles ["controls"]
+
+                Gtk.Button seek_back {
+                  icon-name: "media-seek-backward-symbolic";
+                  tooltip-text: _("Back 10 seconds");
+                  styles ["flat"]
+                }
+
+                Gtk.Button play_button_small {
+                  icon-name: "media-playback-start-symbolic";
+                  tooltip-text: _("Play / Pause");
+                  styles ["flat"]
+                }
+
+                Gtk.Button seek_forward {
+                  icon-name: "media-seek-forward-symbolic";
+                  tooltip-text: _("Forward 10 seconds");
+                  styles ["flat"]
+                }
+
+                Gtk.Button mute_button {
+                  icon-name: "audio-volume-high-symbolic";
+                  tooltip-text: _("Mute / Unmute");
+                  styles ["flat"]
+                }
+
+                Gtk.Scale volume_scale {
+                  orientation: horizontal;
+                  width-request: 100;
+                  draw-value: false;
+                  valign: center;
+                  adjustment: Gtk.Adjustment {
+                    lower: 0.0;
+                    upper: 1.0;
+                    value: 0.7;
+                    step-increment: 0.05;
+                    page-increment: 0.1;
+                  };
+                }
+
+                Gtk.Button fullscreen_button {
+                  icon-name: "view-fullscreen-symbolic";
+                  tooltip-text: _("Fullscreen");
+                  styles ["flat"]
+                }
+              }
+
+              [overlay]
               Gtk.Label {
                 label: "LIVE";
                 halign: end;
-                valign: end;
+                valign: start;
                 margin-end: 8;
-                margin-bottom: 8;
+                margin-top: 8;
                 styles ["caption", "dim-label"]
               }
             }

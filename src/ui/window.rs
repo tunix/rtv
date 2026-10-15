@@ -60,13 +60,27 @@ mod imp {
         #[template_child]
         pub play_button: TemplateChild<gtk::Button>,
         #[template_child]
+        pub play_button_small: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub seek_back: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub seek_forward: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub mute_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub volume_scale: TemplateChild<gtk::Scale>,
+        #[template_child]
+        pub fullscreen_button: TemplateChild<gtk::Button>,
+        #[template_child]
         pub channel_title: TemplateChild<gtk::Label>,
         #[template_child]
         pub channel_status: TemplateChild<gtk::Label>,
 
         /// UI-mock state.
         pub playing: Cell<bool>,
+        pub muted: Cell<bool>,
         pub has_source: Cell<bool>,
+        pub last_selected: Cell<u32>,
         pub favorites: RefCell<Vec<String>>,
         pub current: RefCell<Option<String>>,
         pub collapsed: RefCell<Vec<bool>>,
@@ -177,19 +191,25 @@ impl Window {
         // Source picker, valhalla-style, in the header title area.
         let model = gtk::StringList::new(&["Xtream — Home Panel", "M3U — Trial List"]);
         let dropdown = gtk::DropDown::new(Some(model), None::<gtk::Expression>);
+        dropdown.set_selected(0);
+        imp.dropdown_box.append(&dropdown);
+        imp.dropdown.replace(Some(dropdown.clone()));
+        imp.last_selected.set(0);
         let win = self.downgrade();
         dropdown.connect_selected_notify(move |dd| {
-            if let Some(win) = win.upgrade() {
-                let name = if dd.selected() == 0 {
-                    "Xtream — Home Panel"
-                } else {
-                    "M3U — Trial List"
-                };
-                win.toast(&format!("Source switched (mock): {name}"));
+            let Some(win) = win.upgrade() else { return };
+            let sel = dd.selected();
+            // The property also notifies outside user interaction; only
+            // toast genuine switches, and name the ACTUALLY selected item.
+            if sel == win.imp().last_selected.get() {
+                return;
             }
+            win.imp().last_selected.set(sel);
+            let Some(item) = dd.selected_item().and_downcast::<gtk::StringObject>() else {
+                return;
+            };
+            win.toast(&format!("Source switched (mock): {}", item.string()));
         });
-        imp.dropdown_box.append(&dropdown);
-        imp.dropdown.replace(Some(dropdown));
 
         // Classify the static rows: category headers vs channel rows.
         let mut group: i32 = -1;
@@ -289,6 +309,57 @@ impl Window {
                     win.toggle_fav(&name);
                 }
             }
+        });
+
+        // Player control bar (mock): seek, play/pause, mute, fullscreen.
+        // Volume gets its state from the VolumeButton itself.
+        let win = self.downgrade();
+        imp.seek_back.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                win.toast("Seek back 10s (mock)");
+            }
+        });
+        let win = self.downgrade();
+        imp.seek_forward.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                win.toast("Seek forward 10s (mock)");
+            }
+        });
+        let win = self.downgrade();
+        imp.play_button_small.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                win.toggle_playing();
+            }
+        });
+        let win = self.downgrade();
+        imp.mute_button.connect_clicked(move |_| {
+            let Some(win) = win.upgrade() else { return };
+            let imp = win.imp();
+            imp.muted.set(!imp.muted.get());
+            imp.mute_button.set_icon_name(if imp.muted.get() {
+                "audio-volume-muted-symbolic"
+            } else {
+                "audio-volume-high-symbolic"
+            });
+        });
+        let win = self.downgrade();
+        imp.fullscreen_button.connect_clicked(move |_| {
+            let Some(win) = win.upgrade() else { return };
+            if win.is_fullscreen() {
+                win.unfullscreen();
+            } else {
+                win.fullscreen();
+            }
+        });
+        // The fullscreen icon follows the real window state.
+        self.connect_fullscreened_notify(|win| {
+            win.imp()
+                .fullscreen_button
+                .set_icon_name(if win.is_fullscreen() {
+                    "view-restore-symbolic"
+                } else {
+                    "view-fullscreen-symbolic"
+                });
         });
 
         self.rebuild_favorites();
@@ -444,9 +515,7 @@ impl Window {
         imp.channel_title.set_label(name);
         imp.channel_status.set_label("Live · 1080p");
         imp.playing.set(false);
-        if let Some(img) = imp.play_button.child().and_downcast::<gtk::Image>() {
-            img.set_icon_name(Some("media-playback-start-symbolic"));
-        }
+        self.set_play_icon(false);
         let is_fav = imp.favorites.borrow().iter().any(|n| n == name);
         set_heart_active(&imp.player_heart, is_fav);
         imp.main_view.push(&*imp.player_page);
@@ -455,19 +524,26 @@ impl Window {
     fn toggle_playing(&self) {
         let imp = self.imp();
         imp.playing.set(!imp.playing.get());
-        let playing = imp.playing.get();
-        if let Some(img) = imp.play_button.child().and_downcast::<gtk::Image>() {
-            img.set_icon_name(Some(if playing {
-                "media-playback-pause-symbolic"
-            } else {
-                "media-playback-start-symbolic"
-            }));
-        }
-        imp.channel_status.set_label(if playing {
+        self.set_play_icon(imp.playing.get());
+        imp.channel_status.set_label(if imp.playing.get() {
             "Playing (mock)"
         } else {
             "Live · 1080p"
         });
+    }
+
+    /// Keep the big centered play button and the bar's play button in sync.
+    fn set_play_icon(&self, playing: bool) {
+        let imp = self.imp();
+        let icon = if playing {
+            "media-playback-pause-symbolic"
+        } else {
+            "media-playback-start-symbolic"
+        };
+        if let Some(img) = imp.play_button.child().and_downcast::<gtk::Image>() {
+            img.set_icon_name(Some(icon));
+        }
+        imp.play_button_small.set_icon_name(icon);
     }
 }
 
