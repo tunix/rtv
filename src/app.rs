@@ -17,7 +17,6 @@ pub fn run() {
         }
 
         let window = ui::window::Window::new(app);
-        window.setup_mock_handlers();
         window.present();
     });
 
@@ -39,7 +38,11 @@ fn register_icon_theme() {
 
 fn load_css() {
     let css = gtk::CssProvider::new();
-    css.load_from_string(".player { background: #171723; border-radius: 16px; }\n");
+    css.load_from_string(concat!(
+        ".player { background: #171723; border-radius: 16px; }\n",
+        ".heart-btn { opacity: 0.55; }\n",
+        ".heart-btn.active { opacity: 1; color: #e01b24; }\n",
+    ));
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,
