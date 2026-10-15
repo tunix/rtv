@@ -3,8 +3,8 @@ using Adw 1;
 
 template $RtvWindow : Adw.ApplicationWindow {
   title: _("RTV");
-  default-width: 960;
-  default-height: 600;
+  default-width: 1100;
+  default-height: 720;
   width-request: 360;
   height-request: 300;
 
@@ -12,25 +12,268 @@ template $RtvWindow : Adw.ApplicationWindow {
     child: Adw.ToolbarView {
 
       [top]
-      Adw.HeaderBar {
-        [end]
-        Gtk.MenuButton {
-          primary: true;
-          icon-name: "open-menu-symbolic";
-          tooltip-text: _("Main Menu");
-          menu-model: primary_menu;
-        }
-      }
+      Adw.HeaderBar {}
 
-      content: Adw.StatusPage {
-        icon-name: "io.github.tunix.rtv";
-        title: _("No source configured");
-        description: _("Add an Xtream Codes account or an M3U playlist to start watching live TV.");
+      content: Adw.NavigationSplitView {
+        min-sidebar-width: 260;
 
-        child: Gtk.Button add_source_button {
-          label: _("Add source");
-          action-name: "win.add-source";
-          styles ["suggested-action", "pill"]
+        sidebar: Adw.NavigationPage sidebar_page {
+          title: _("Channels");
+
+          child: Adw.ToolbarView {
+
+            [top]
+            Adw.HeaderBar {}
+
+            content: Gtk.Box {
+              orientation: vertical;
+              margin-start: 6;
+              margin-end: 6;
+              margin-bottom: 6;
+
+              Gtk.SearchEntry channel_search {
+                margin-top: 6;
+                margin-start: 6;
+                margin-end: 6;
+                placeholder-text: _("Search channels…");
+              }
+
+              Gtk.ScrolledWindow {
+                vexpand: true;
+                hscrollbar-policy: never;
+
+                child: Gtk.ListBox channel_list {
+                  styles ["navigation-sidebar"]
+                  selection-mode: single;
+
+                  Gtk.ListBoxRow {
+                    activatable: false;
+                    selectable: false;
+
+                    child: Gtk.Label {
+                      label: _("Live");
+                      xalign: 0;
+                      margin-top: 6;
+                      styles ["caption", "dim-label"]
+                    };
+                  }
+
+                  Gtk.ListBoxRow {
+                    child: Gtk.Box {
+                      spacing: 12;
+
+                      Gtk.Image {
+                        icon-name: "video-display-symbolic";
+                        pixel-size: 16;
+                        valign: center;
+                      }
+
+                      Gtk.Label {
+                        label: "News 24";
+                        halign: start;
+                        ellipsize: end;
+                      }
+                    };
+                  }
+
+                  Gtk.ListBoxRow {
+                    child: Gtk.Box {
+                      spacing: 12;
+
+                      Gtk.Image {
+                        icon-name: "video-display-symbolic";
+                        pixel-size: 16;
+                        valign: center;
+                      }
+
+                      Gtk.Label {
+                        label: "National Geo HD";
+                        halign: start;
+                        ellipsize: end;
+                      }
+                    };
+                  }
+
+                  Gtk.ListBoxRow {
+                    activatable: false;
+                    selectable: false;
+
+                    child: Gtk.Label {
+                      label: _("Sports");
+                      xalign: 0;
+                      margin-top: 6;
+                      styles ["caption", "dim-label"]
+                    };
+                  }
+
+                  Gtk.ListBoxRow {
+                    child: Gtk.Box {
+                      spacing: 12;
+
+                      Gtk.Image {
+                        icon-name: "video-display-symbolic";
+                        pixel-size: 16;
+                        valign: center;
+                      }
+
+                      Gtk.Label {
+                        label: "Sports HD";
+                        halign: start;
+                        ellipsize: end;
+                      }
+                    };
+                  }
+
+                  Gtk.ListBoxRow {
+                    child: Gtk.Box {
+                      spacing: 12;
+
+                      Gtk.Image {
+                        icon-name: "video-display-symbolic";
+                        pixel-size: 16;
+                        valign: center;
+                      }
+
+                      Gtk.Label {
+                        label: "Bein Sports 1";
+                        halign: start;
+                        ellipsize: end;
+                      }
+                    };
+                  }
+
+                  Gtk.ListBoxRow {
+                    activatable: false;
+                    selectable: false;
+
+                    child: Gtk.Label {
+                      label: _("Movies");
+                      xalign: 0;
+                      margin-top: 6;
+                      styles ["caption", "dim-label"]
+                    };
+                  }
+
+                  Gtk.ListBoxRow {
+                    child: Gtk.Box {
+                      spacing: 12;
+
+                      Gtk.Image {
+                        icon-name: "video-display-symbolic";
+                        pixel-size: 16;
+                        valign: center;
+                      }
+
+                      Gtk.Label {
+                        label: "Cinema One";
+                        halign: start;
+                        ellipsize: end;
+                      }
+                    };
+                  }
+
+                  Gtk.ListBoxRow {
+                    child: Gtk.Box {
+                      spacing: 12;
+
+                      Gtk.Image {
+                        icon-name: "video-display-symbolic";
+                        pixel-size: 16;
+                        valign: center;
+                      }
+
+                      Gtk.Label {
+                        label: "Action Movies";
+                        halign: start;
+                        ellipsize: end;
+                      }
+                    };
+                  }
+                };
+              }
+            };
+          };
+        };
+
+        content: Adw.NavigationPage content_page {
+          title: _("RTV");
+
+          child: Adw.ToolbarView {
+
+            [top]
+            Adw.HeaderBar {
+              [end]
+              Gtk.MenuButton {
+                primary: true;
+                icon-name: "open-menu-symbolic";
+                tooltip-text: _("Main Menu");
+                menu-model: primary_menu;
+              }
+            }
+
+            content: Adw.Clamp {
+              maximum-size: 1000;
+              tightening-threshold: 800;
+              margin-top: 12;
+              margin-start: 12;
+              margin-end: 12;
+              margin-bottom: 12;
+
+              child: Gtk.Box {
+                orientation: vertical;
+                spacing: 12;
+                valign: start;
+
+                Gtk.Overlay {
+
+                  child: Gtk.Box player_box {
+                    styles ["player"]
+                    height-request: 380;
+                  };
+
+                  [overlay]
+                  Gtk.Button play_button {
+                    halign: center;
+                    valign: center;
+                    styles ["circular", "osd"]
+
+                    child: Gtk.Image {
+                      pixel-size: 28;
+                      icon-name: "media-playback-start-symbolic";
+                    };
+                  }
+
+                  [overlay]
+                  Gtk.Label {
+                    label: "LIVE";
+                    halign: end;
+                    valign: end;
+                    margin-end: 8;
+                    margin-bottom: 8;
+                    styles ["caption", "dim-label"]
+                  }
+                }
+
+                Gtk.Box {
+                  spacing: 12;
+
+                  Gtk.Label channel_title {
+                    styles ["title-3"]
+                    label: _("Select a channel");
+                    halign: start;
+                    hexpand: true;
+                    ellipsize: end;
+                  }
+
+                  Gtk.Label channel_status {
+                    styles ["dim-label"]
+                    label: "—";
+                    valign: center;
+                  }
+                }
+              };
+            };
+          };
         };
       };
     };
