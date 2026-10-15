@@ -42,6 +42,9 @@ fn main() {
     xml.push_str(
         r#"<file compressed="true" alias="icons/hicolor/scalable/apps/io.github.tunix.rtv.svg">io.github.tunix.rtv.svg</file>"#,
     );
+    xml.push_str(
+        r#"<file compressed="true" alias="icons/hicolor/scalable/apps/rtv-heart-symbolic.svg">rtv-heart-symbolic.svg</file>"#,
+    );
     xml.push_str("</gresource></gresources>");
     let gxml = out.join("rtv.gresources.xml");
     fs::write(&gxml, xml).expect("write gresource xml");
