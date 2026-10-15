@@ -21,7 +21,7 @@ template $RtvWindow : Adw.ApplicationWindow {
           [top]
           Adw.HeaderBar {}
 
-          content: Adw.StatusPage {
+          content: Adw.StatusPage welcome_status {
             icon-name: "io.github.tunix.rtv";
             title: _("Welcome to RTV");
             description: _("Add an IPTV source — an Xtream Codes account or an M3U playlist — to start watching live TV.");
@@ -382,7 +382,7 @@ template $RtvWindow : Adw.ApplicationWindow {
         child: Adw.ToolbarView {
 
           [top]
-          Adw.HeaderBar {
+          Adw.HeaderBar player_headerbar {
             [end]
             Gtk.Button player_heart {
               icon-name: "rtv-heart-symbolic";
@@ -391,7 +391,7 @@ template $RtvWindow : Adw.ApplicationWindow {
             }
           }
 
-          content: Gtk.Box {
+          content: Gtk.Box player_content {
             orientation: vertical;
             spacing: 12;
             margin-start: 12;
@@ -407,68 +407,71 @@ template $RtvWindow : Adw.ApplicationWindow {
               };
 
               [overlay]
-              Gtk.Button play_button {
+              Gtk.Image app_watermark {
+                icon-name: "io.github.tunix.rtv";
+                pixel-size: 240;
                 halign: center;
                 valign: center;
-                styles ["circular", "osd"]
-
-                child: Gtk.Image {
-                  pixel-size: 28;
-                  icon-name: "media-playback-start-symbolic";
-                };
+                opacity: 0.15;
               }
 
               [overlay]
-              Gtk.Box controls {
+              Gtk.Revealer controls_revealer {
                 halign: center;
                 valign: end;
                 margin-bottom: 12;
-                spacing: 6;
-                styles ["controls"]
+                transition-type: crossfade;
+                transition-duration: 350;
+                reveal-child: true;
 
-                Gtk.Button seek_back {
-                  icon-name: "media-seek-backward-symbolic";
-                  tooltip-text: _("Back 10 seconds");
-                  styles ["flat"]
-                }
+                child: Gtk.Box controls {
+                  spacing: 6;
+                  styles ["controls"]
 
-                Gtk.Button play_button_small {
-                  icon-name: "media-playback-start-symbolic";
-                  tooltip-text: _("Play / Pause");
-                  styles ["flat"]
-                }
+                  Gtk.Button seek_back {
+                    icon-name: "media-seek-backward-symbolic";
+                    tooltip-text: _("Back 10 seconds");
+                    styles ["flat"]
+                  }
 
-                Gtk.Button seek_forward {
-                  icon-name: "media-seek-forward-symbolic";
-                  tooltip-text: _("Forward 10 seconds");
-                  styles ["flat"]
-                }
+                  Gtk.Button play_button_small {
+                    icon-name: "media-playback-start-symbolic";
+                    tooltip-text: _("Play / Pause");
+                    styles ["flat"]
+                  }
 
-                Gtk.Button mute_button {
-                  icon-name: "audio-volume-high-symbolic";
-                  tooltip-text: _("Mute / Unmute");
-                  styles ["flat"]
-                }
+                  Gtk.Button seek_forward {
+                    icon-name: "media-seek-forward-symbolic";
+                    tooltip-text: _("Forward 10 seconds");
+                    styles ["flat"]
+                  }
 
-                Gtk.Scale volume_scale {
-                  orientation: horizontal;
-                  width-request: 100;
-                  draw-value: false;
-                  valign: center;
-                  adjustment: Gtk.Adjustment {
-                    lower: 0.0;
-                    upper: 1.0;
-                    value: 0.7;
-                    step-increment: 0.05;
-                    page-increment: 0.1;
-                  };
-                }
+                  Gtk.Button mute_button {
+                    icon-name: "audio-volume-high-symbolic";
+                    tooltip-text: _("Mute / Unmute");
+                    styles ["flat"]
+                  }
 
-                Gtk.Button fullscreen_button {
-                  icon-name: "view-fullscreen-symbolic";
-                  tooltip-text: _("Fullscreen");
-                  styles ["flat"]
-                }
+                  Gtk.Scale volume_scale {
+                    orientation: horizontal;
+                    width-request: 100;
+                    draw-value: false;
+                    valign: center;
+                    adjustment: Gtk.Adjustment {
+                      lower: 0.0;
+                      upper: 1.0;
+                      value: 0.7;
+                      step-increment: 0.05;
+                      page-increment: 0.1;
+                    };
+                  }
+
+                  Gtk.Button fullscreen_button {
+                    icon-name: "view-fullscreen-symbolic";
+                    tooltip-text: _("Fullscreen");
+                    styles ["flat"]
+                  }
+                };
               }
 
               [overlay]

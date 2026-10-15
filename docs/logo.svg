@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">RTV</title>
+  <desc id="desc">A blue, violet and coral folded play ribbon framing white RTV lettering, with two broadcast arcs, on transparent canvas.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#27364f" /><stop offset=".48" stop-color="#1d263b" /><stop offset="1" stop-color="#171c2e" />
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2=".85">
+      <stop stop-color="#9cddfc" /><stop offset=".25" stop-color="#5795ef" /><stop offset=".56" stop-color="#7776b5" /><stop offset=".8" stop-color="#e880a2" /><stop offset="1" stop-color="#ffa16c" />
+    </linearGradient>
+    <radialGradient id="blueLight" cx="0" cy=".15" r=".9">
+      <stop stop-color="#659ce5" stop-opacity=".23" /><stop offset="1" stop-color="#659ce5" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="coralLight" cx="1" cy="1" r=".85">
+      <stop stop-color="#ef8a85" stop-opacity=".21" /><stop offset="1" stop-color="#ef8a85" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="ribbon" gradientUnits="userSpaceOnUse" x1="99" y1="79" x2="420" y2="236">
+      <stop stop-color="#a2edf7" /><stop offset=".22" stop-color="#69bdf9" /><stop offset=".53" stop-color="#658ff0" /><stop offset=".69" stop-color="#8d7de0" /><stop offset=".86" stop-color="#fa929d" /><stop offset="1" stop-color="#ffb77f" />
+    </linearGradient>
+    <linearGradient id="lower" gradientUnits="userSpaceOnUse" x1="106" y1="418" x2="439" y2="282">
+      <stop stop-color="#fa7185" /><stop offset=".27" stop-color="#f86a83" /><stop offset=".66" stop-color="#ff917d" /><stop offset="1" stop-color="#ffb77f" />
+    </linearGradient>
+    <linearGradient id="fold" gradientUnits="userSpaceOnUse" x1="64" y1="265" x2="143" y2="277">
+      <stop stop-color="#f4f7fc" /><stop offset=".45" stop-color="#e7effa" /><stop offset=".76" stop-color="#c5d6ec" /><stop offset="1" stop-color="#7e9bc2" />
+    </linearGradient>
+    <linearGradient id="turn" gradientUnits="userSpaceOnUse" x1="121" y1="356" x2="174" y2="446">
+      <stop stop-color="#b93d64" /><stop offset="1" stop-color="#fa7185" />
+    </linearGradient>
+    <linearGradient id="letters" x1="0" y1="0" x2=".4" y2="1">
+      <stop stop-color="#ffffff" /><stop offset="1" stop-color="#e7eef9" />
+    </linearGradient>
+    <linearGradient id="blueArc" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#86cefb" /><stop offset="1" stop-color="#61a8f5" />
+    </linearGradient>
+    <linearGradient id="coralArc" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#ff8998" /><stop offset="1" stop-color="#fb727e" />
+    </linearGradient>
+  </defs>
+  <g id="artwork" transform="translate(-15.5 -3)">
+    <!-- Interior panel: the ribbon's counter stays dark so the white
+         lettering survives on light backgrounds (squircle-less variant). -->
+    <path fill="url(#background)" stroke="url(#background)" stroke-width="6" d="M130 121C123 145 121 179 121 213V351C121 371 121 381 134 385C143 388 154 385 169 380L390 298C412 290 424 280 424 266C424 251 416 239 398 230L153 128C145 124 137 122 130 121Z" />
+    <path fill="url(#ribbon)" fill-rule="evenodd" d="M67 176C67 115 91 69 132 56C157 48 177 55 200 69L435 210C462 226 476 246 476 267C476 291 460 308 434 322L201 448C158 472 115 469 88 441C70 422 67 400 67 369ZM130 121C123 145 121 179 121 213V351C121 371 121 381 134 385C143 388 154 385 169 380L390 298C412 290 424 280 424 266C424 251 416 239 398 230L153 128C145 124 137 122 130 121Z" />
+    <path fill="url(#fold)" d="M67 177C69 142 83 122 104 120C113 118 122 119 130 121C123 145 121 179 121 213V322L91 398C85 414 84 429 88 441C70 422 67 400 67 369Z" />
+    <path fill="url(#lower)" d="M121 322C121 353 121 378 134 385C143 389 154 385 169 380L390 298C412 290 424 280 424 266L476 267C476 291 460 308 434 322L201 448C158 472 115 469 88 441C80 426 89 401 98 379Z" />
+    <path fill="url(#turn)" d="M121 322C119 371 124 411 145 433C161 448 181 451 201 448C166 461 133 445 119 421C107 397 114 352 121 322Z" opacity=".64" />
+    <path d="M68 174C68 114 92 69 132 56C157 48 177 55 200 69L435 210" fill="none" stroke="#d2f6ff" stroke-width="1.5" opacity=".65" />
+    <path d="M134 385C143 389 154 385 169 380L390 298" fill="none" stroke="#ffd0c0" stroke-width="1.2" opacity=".55" />
+    <g fill="none" stroke-linecap="round">
+      <path d="M357 71C410 71 455 114 459 166" stroke="url(#blueArc)" stroke-width="23" />
+      <path d="M357 112C389 112 414 136 418 167" stroke="url(#coralArc)" stroke-width="23" />
+    </g>
+    <g fill="url(#letters)">
+      <path d="M138 210H187C208 210 220 221 220 239C220 255 210 266 191 268L222 300Q224 303 220 303H191Q189 303 187 301L148 255Q145 251 150 250H186C192 250 196 247 196 241C196 235 192 231 186 231H154C146 231 142 227 140 221L136 214Q135 210 138 210Z" />
+      <path d="M216 210H289Q292 210 292 213V228Q292 231 289 231H269V300Q269 303 266 303H248Q245 303 245 300V234Q245 231 242 231H228Q226 231 225 227L215 214Q213 210 216 210Z" />
+      <path d="M301 210H321Q323 210 324 213L348 271L372 213Q373 210 375 210H395Q398 210 396 214L360 300Q359 303 356 303H339Q336 303 335 300L299 214Q297 210 301 210Z" />
+    </g>
+    <path d="M343 223Q343 221 345 222L363 232Q365 233 363 234L345 245Q343 246 343 244Z" fill="url(#coralArc)" />
+  </g>
+</svg>

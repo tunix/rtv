@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="data/icons/hicolor/scalable/apps/io.github.tunix.rtv.svg" width="192" alt="RTV logo"/>
+  <img src="docs/logo.png" width="256" alt="RTV logo"/>
 </p>
 
 # RTV

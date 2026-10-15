@@ -26,6 +26,7 @@ IPTV player for the GNOME desktop. Rust + GTK4/libadwaita, Xtream Codes first, M
 ## Gotchas
 
 - gtk4-rs/glib-rs APIs drift between versions: verify signatures against vendored sources in `~/.cargo/registry` before writing bindings code.
+- GTK 4.22.5 (container) ignores icon-theme resource paths: `add_resource_path` is a no-op on display AND standalone themes. Bundled icons are exported to `$XDG_RUNTIME_DIR/rtv-icons` at startup (`app::install_runtime_icons`) and that dir is registered as a search path; use plain `icon-name` afterwards. Diagnose with `cargo run -- --check-icons`.
 - glib objects are not `Send`; once the tokio runtime lands, settings access from workers needs a Send wrapper (see valhalla's `SendSettings` pattern).
 - Xtream API responses are JSON but endpoints differ per panel version; don't assume fields are always present.
 
