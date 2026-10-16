@@ -25,12 +25,16 @@ IPTV player for the GNOME desktop. Rust + GTK4/libadwaita, Xtream Codes first, M
 - Loading policy: adding a source shows the UI immediately and streams content in progressively; later launches render from the local cache first and refresh async in the background. Never block the user on loading, but always surface progress.
 - Artwork/covers are cached locally; on any fetch failure use placeholder art, degrade gracefully, and NEVER crash.
 - Xtream categories are flat (parent_id=0) and M3U nests by group-title; the real tree will be modeled after the dumps in `samples/` (gitignored — never commit them, they contain credentials).
+- Data model (confirmed from samples/): Xtream sections (live/series/vod) each carry their OWN flat category list (parent_id=0, no hierarchy). Nesting is: section → category → content; series add one more level: series → seasons[] → episodes{} (episodes dict is keyed by season STRING and may omit special seasons that appear in `seasons[]` — handle missing keys).
+- dogu1's origin kills `get.php` entirely (m3u export blocked at origin, UA-independent, all params): for Xtream sources derive playback from the API; the M3U source type targets generic providers only.
+- Playback/episode URLs embed credentials (`/live/U/P/id.ts`, `/series/U/P/167662.mkv`) — never log, cache to disk, or commit them.
 - Stream URLs can expire or 404: re-resolve on failure, surface a toast/banner, never strand the player.
 
 ## Gotchas
 
 - gtk4-rs/glib-rs APIs drift between versions: verify signatures against vendored sources in `~/.cargo/registry` before writing bindings code.
 - GTK 4.22.5 (container) ignores icon-theme resource paths: `add_resource_path` is a no-op on display AND standalone themes. Bundled icons are exported to `$XDG_RUNTIME_DIR/rtv-icons` at startup (`app::install_runtime_icons`) and that dir is registered as a search path; use plain `icon-name` afterwards. Diagnose with `cargo run -- --check-icons`.
+- The provider's origin filters User-Agents: CLI UAs (curl etc.) get the connection killed and Cloudflare surfaces it as HTTP 520. ALL HTTP requests (API fetches AND stream playback) must send an app-like User-Agent, e.g. `okhttp/4.9.3` (GStreamer: set `user-agent` on `souphttpsrc`).
 - glib timers: never `SourceId::remove()` an id that may have already fired — it panics inside signal trampolines and aborts the app. Neutralize stale timers with a generation counter instead (see `Window::show_controls`).
 - glib objects are not `Send`; once the tokio runtime lands, settings access from workers needs a Send wrapper (see valhalla's `SendSettings` pattern).
 - Xtream API responses are JSON but endpoints differ per panel version; don't assume fields are always present.
