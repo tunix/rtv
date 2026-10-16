@@ -1,21 +1,29 @@
 use adw::prelude::*;
 use gtk::{gio, glib};
+use std::cell::RefCell;
 
-/// Static (blueprint) channel row: name, its heart button, category group.
-#[derive(Debug)]
-pub struct ContentRow {
-    row: gtk::ListBoxRow,
-    name: String,
-    heart: gtk::Button,
-    group: i32,
-}
+use crate::sample::{self, Item, Kind};
 
-/// Static category header row: the whole row is a click target that
-/// collapses/expands its group.
+/// Search results are capped so a one-letter query cannot flood the grid;
+/// the backend phase will replace this with real incremental search.
+const SEARCH_CAP: usize = 500;
+/// Cards appended to a grid per idle tick (progressive rendering).
+const FILL_CHUNK: usize = 40;
+
+/// Sidebar section header row: chevron + label, click toggles collapse.
 #[derive(Debug)]
 pub struct HeaderRow {
     row: gtk::ListBoxRow,
     chevron: gtk::Image,
+    group: i32,
+}
+
+/// Sidebar category row: activating it shows the category's content grid.
+#[derive(Debug)]
+pub struct CategoryRow {
+    row: gtk::ListBoxRow,
+    category_index: usize,
+    name: String,
     group: i32,
 }
 
@@ -29,8 +37,11 @@ mod imp {
     use adw::subclass::prelude::*;
     use gtk::{glib, TemplateChild};
     use std::cell::{Cell, RefCell};
+    use std::sync::OnceLock;
 
-    use super::{ContentRow, HeaderRow};
+    use crate::sample::Catalog;
+
+    use super::{CategoryRow, HeaderRow};
 
     #[derive(Debug, Default, gtk::CompositeTemplate)]
     #[template(resource = "/io/github/tunix/rtv/window.ui")]
@@ -64,6 +75,8 @@ mod imp {
         #[template_child]
         pub player_content: TemplateChild<gtk::Box>,
         #[template_child]
+        pub player_box: TemplateChild<gtk::Box>,
+        #[template_child]
         pub app_watermark: TemplateChild<gtk::Image>,
         #[template_child]
         pub controls_revealer: TemplateChild<gtk::Revealer>,
@@ -80,8 +93,6 @@ mod imp {
         #[template_child]
         pub fullscreen_button: TemplateChild<gtk::Button>,
         #[template_child]
-        pub player_box: TemplateChild<gtk::Box>,
-        #[template_child]
         pub content_info_row: TemplateChild<gtk::Box>,
         #[template_child]
         pub live_badge: TemplateChild<gtk::Label>,
@@ -90,32 +101,34 @@ mod imp {
         #[template_child]
         pub content_grid: TemplateChild<gtk::FlowBox>,
         #[template_child]
+        pub search_grid: TemplateChild<gtk::FlowBox>,
+        #[template_child]
         pub content_title: TemplateChild<gtk::Label>,
         #[template_child]
         pub content_status: TemplateChild<gtk::Label>,
 
+        /// Sample catalog loaded from samples/ (mock phase).
+        pub catalog: OnceLock<Catalog>,
         /// UI-mock state.
         pub playing: Cell<bool>,
         pub muted: Cell<bool>,
         pub has_source: Cell<bool>,
         pub on_player: Cell<bool>,
+        pub selected_category: Cell<i32>,
+        pub last_pointer: Cell<(f64, f64)>,
         pub favorites: RefCell<Vec<String>>,
         pub current: RefCell<Option<String>>,
         pub collapsed: RefCell<Vec<bool>>,
         pub query: RefCell<String>,
-        pub channels: RefCell<Vec<ContentRow>>,
+        pub categories: RefCell<Vec<CategoryRow>>,
         pub headers: RefCell<Vec<HeaderRow>>,
         pub dropdown: RefCell<Option<gtk::DropDown>>,
         /// Bumped on every show/cancel; only the timer matching the latest
         /// generation may hide the controls (stale timers must no-op, since
         /// `SourceId::remove` panics on already-fired ids).
         pub controls_generation: Cell<u64>,
-        /// Sidebar category currently shown in the middle (-1 = none).
-        pub selected_category: Cell<i32>,
-        /// Last pointer position inside the player, for real-movement
-        /// detection (stationary-pointer motion events must not re-reveal
-        /// the auto-hidden controls).
-        pub last_pointer: Cell<(f64, f64)>,
+        /// Bumped on every grid (re)fill; stale chunk fillers no-op.
+        pub fill_generation: Cell<u64>,
     }
 
     #[glib::object_subclass]
@@ -147,17 +160,22 @@ impl Window {
             .property("icon-name", "io.github.tunix.rtv")
             .build();
 
+        let _ = window.imp().catalog.set(sample::Catalog::load());
         window.setup_actions();
         window.setup_browse();
         window.imp().selected_category.set(-1);
         window
     }
 
+    pub fn sample_catalog_missing(&self) -> bool {
+        !self.imp().catalog.get().map(|c| c.found).unwrap_or(false)
+    }
+
     fn imp(&self) -> &imp::Window {
         glib::subclass::types::ObjectSubclassIsExt::imp(self)
     }
 
-    fn toast(&self, msg: &str) {
+    pub fn toast(&self, msg: &str) {
         self.imp().toast_overlay.add_toast(adw::Toast::new(msg));
     }
 
@@ -187,9 +205,6 @@ impl Window {
             let imp = win.imp();
             imp.has_source.set(false);
             imp.favorites.borrow_mut().clear();
-            for c in imp.channels.borrow().iter() {
-                set_heart_active(&c.heart, false);
-            }
             *imp.current.borrow_mut() = None;
             win.rebuild_favorites();
             imp.main_view.pop_to_page(&*imp.welcome_page);
@@ -288,78 +303,26 @@ impl Window {
         imp.dropdown_box.append(&dropdown);
         imp.dropdown.replace(Some(dropdown));
 
-        // Classify the static rows: category headers vs channel rows.
-        let mut group: i32 = -1;
-        let mut child = imp.content_list.first_child();
-        while let Some(widget) = child {
-            child = widget.next_sibling();
-            let Some(row) = widget.downcast_ref::<gtk::ListBoxRow>() else {
-                continue;
-            };
-            let Some(box_) = row.child().and_downcast::<gtk::Box>() else {
-                continue;
-            };
-            let is_header = box_
-                .first_child()
-                .and_downcast::<gtk::Image>()
-                .and_then(|i| i.icon_name())
-                .map(|n| n.starts_with("chevron"))
-                .unwrap_or(false);
-            if is_header {
-                group += 1;
-                let chevron = box_
-                    .first_child()
-                    .and_downcast::<gtk::Image>()
-                    .expect("header chevron");
-                let win = self.downgrade();
-                let gesture = gtk::GestureClick::new();
-                gesture.connect_pressed(move |_, _, _, _| {
-                    if let Some(win) = win.upgrade() {
-                        // First click selects the category (grid in the
-                        // middle); clicking the selected one toggles it.
-                        if win.imp().selected_category.get() == group {
-                            win.toggle_group(group);
-                        } else {
-                            win.select_category(group);
-                        }
-                    }
-                });
-                row.add_controller(gesture);
-                imp.headers.borrow_mut().push(HeaderRow {
-                    row: row.clone(),
-                    chevron: chevron.clone(),
-                    group,
-                });
-            } else {
-                let name = first_label(&box_).unwrap_or_default();
-                let heart = row_heart(&box_);
-                let win = self.downgrade();
-                let closure_name = name.clone();
-                heart.connect_clicked(move |_| {
-                    if let Some(win) = win.upgrade() {
-                        win.toggle_fav(&closure_name);
-                    }
-                });
-                imp.channels.borrow_mut().push(ContentRow {
-                    row: row.clone(),
-                    name,
-                    heart,
-                    group,
-                });
-            }
-        }
+        self.setup_sidebar();
 
-        // Channel activation -> full-window player.
+        // Sidebar category activation -> content grid in the middle.
         let win = self.downgrade();
         imp.content_list.connect_row_activated(move |_, row| {
-            if let Some(win) = win.upgrade() {
-                if let Some(name) = row_label(row) {
-                    win.play(&name);
-                }
+            let Some(win) = win.upgrade() else { return };
+            let i = win.imp();
+            let index = row.index();
+            let target = i
+                .categories
+                .borrow()
+                .iter()
+                .find(|c| c.row.index() == index)
+                .map(|c| c.category_index);
+            if let Some(cat_idx) = target {
+                win.select_category(cat_idx);
             }
         });
 
-        // Favorites activation -> the same player.
+        // Favorites activation -> the player.
         let win = self.downgrade();
         imp.favorites_list.connect_row_activated(move |_, row| {
             if let Some(win) = win.upgrade() {
@@ -369,7 +332,29 @@ impl Window {
             }
         });
 
-        // Search across favorites + channels.
+        // Grid cards -> the player.
+        let win = self.downgrade();
+        imp.content_grid.connect_child_activated(move |_, child| {
+            if let Some(win) = win.upgrade() {
+                if let Some(b) = child.child().and_downcast::<gtk::Box>() {
+                    if let Some(name) = first_label(&b) {
+                        win.play(&name);
+                    }
+                }
+            }
+        });
+        let win = self.downgrade();
+        imp.search_grid.connect_child_activated(move |_, child| {
+            if let Some(win) = win.upgrade() {
+                if let Some(b) = child.child().and_downcast::<gtk::Box>() {
+                    if let Some(name) = first_label(&b) {
+                        win.play(&name);
+                    }
+                }
+            }
+        });
+
+        // Search across the whole catalog.
         let win = self.downgrade();
         imp.search_entry.connect_search_changed(move |entry| {
             if let Some(win) = win.upgrade() {
@@ -424,18 +409,6 @@ impl Window {
                 let name = win.imp().current.borrow().clone();
                 if let Some(name) = name {
                     win.toggle_fav(&name);
-                }
-            }
-        });
-
-        // Category selection -> content grid in the middle.
-        let win = self.downgrade();
-        imp.content_grid.connect_child_activated(move |_, child| {
-            if let Some(win) = win.upgrade() {
-                if let Some(b) = child.child().and_downcast::<gtk::Box>() {
-                    if let Some(name) = first_label(&b) {
-                        win.play(&name);
-                    }
                 }
             }
         });
@@ -499,6 +472,84 @@ impl Window {
         self.rebuild_favorites();
     }
 
+    /// Build the sidebar dynamically from the sample catalog: one collapsible
+    /// section per content kind, its categories underneath.
+    fn setup_sidebar(&self) {
+        let imp = self.imp();
+        let Some(catalog) = imp.catalog.get() else {
+            return;
+        };
+
+        for (group, kind) in Kind::ALL.iter().enumerate() {
+            let group = group as i32;
+            let cats: Vec<(usize, &sample::Category)> = catalog
+                .categories
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.kind == *kind)
+                .collect();
+
+            let header = gtk::ListBoxRow::builder()
+                .activatable(false)
+                .selectable(false)
+                .build();
+            let header_box = gtk::Box::builder().spacing(6).build();
+            let chevron = gtk::Image::builder()
+                .icon_name("chevron-down-symbolic")
+                .pixel_size(14)
+                .valign(gtk::Align::Center)
+                .build();
+            header_box.append(&chevron);
+            header_box.append(
+                &gtk::Label::builder()
+                    .label(format!("{} · {}", kind.title(), cats.len()))
+                    .xalign(0.0)
+                    .css_classes(["caption", "dim-label"])
+                    .build(),
+            );
+            header.set_child(Some(&header_box));
+            let win = self.downgrade();
+            let gesture = gtk::GestureClick::new();
+            gesture.connect_pressed(move |_, _, _, _| {
+                if let Some(win) = win.upgrade() {
+                    win.toggle_group(group);
+                }
+            });
+            header.add_controller(gesture);
+            imp.content_list.append(&header);
+            imp.headers.borrow_mut().push(HeaderRow {
+                row: header,
+                chevron,
+                group,
+            });
+
+            for (cat_index, cat) in cats {
+                let count = catalog
+                    .items
+                    .iter()
+                    .filter(|it| it.kind == *kind && it.category_id == cat.id)
+                    .count();
+                let row = gtk::ListBoxRow::new();
+                let row_box = gtk::Box::builder().margin_start(26).build();
+                row_box.append(
+                    &gtk::Label::builder()
+                        .label(format!("{} ({})", cat.name, count))
+                        .halign(gtk::Align::Start)
+                        .ellipsize(gtk::pango::EllipsizeMode::End)
+                        .build(),
+                );
+                row.set_child(Some(&row_box));
+                imp.content_list.append(&row);
+                imp.categories.borrow_mut().push(CategoryRow {
+                    row,
+                    category_index: cat_index,
+                    name: cat.name.clone(),
+                    group,
+                });
+            }
+        }
+    }
+
     fn toggle_group(&self, group: i32) {
         let imp = self.imp();
         {
@@ -531,19 +582,46 @@ impl Window {
     }
 
     fn apply_search(&self, text: &str) {
-        *self.imp().query.borrow_mut() = text.to_string();
+        let imp = self.imp();
+        *imp.query.borrow_mut() = text.to_string();
         self.refresh_rows_visibility();
+
+        let q = text.trim().to_lowercase();
+        if q.is_empty() {
+            if imp.selected_category.get() >= 0 {
+                imp.content_stack.set_visible_child_name("grid");
+            } else {
+                imp.content_stack.set_visible_child_name("empty");
+            }
+            return;
+        }
+
+        imp.fill_generation.set(imp.fill_generation.get() + 1);
+        while let Some(child) = imp.search_grid.first_child() {
+            imp.search_grid.remove(&child);
+        }
+        let catalog = imp.catalog.get().expect("catalog");
+        let indices: Vec<usize> = catalog
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| it.name.to_lowercase().contains(&q))
+            .take(SEARCH_CAP)
+            .map(|(i, _)| i)
+            .collect();
+        let favs = imp.favorites.borrow().clone();
+        imp.content_stack.set_visible_child_name("search");
+        self.fill_grid(indices, &imp.search_grid, &favs);
     }
 
     /// Visibility of every sidebar row, driven by the search query and the
-    /// per-group collapse state. While searching, groups are implicitly
-    /// expanded (matching rows show even in collapsed groups).
+    /// per-section collapse state.
     fn refresh_rows_visibility(&self) {
         let imp = self.imp();
         let q = imp.query.borrow().to_lowercase();
 
         if q.is_empty() {
-            for c in imp.channels.borrow().iter() {
+            for c in imp.categories.borrow().iter() {
                 c.row.set_visible(!self.collapsed(c.group));
             }
             for h in imp.headers.borrow().iter() {
@@ -552,7 +630,7 @@ impl Window {
         } else {
             let n_groups = imp.headers.borrow().len();
             let mut counts = vec![0usize; n_groups];
-            for c in imp.channels.borrow().iter() {
+            for c in imp.categories.borrow().iter() {
                 let matches = c.name.to_lowercase().contains(&q);
                 c.row.set_visible(matches);
                 if matches && c.group >= 0 {
@@ -578,7 +656,70 @@ impl Window {
         }
     }
 
-    fn toggle_fav(&self, name: &str) {
+    /// Show a category's content as a card grid in the middle pane.
+    fn select_category(&self, category_index: usize) {
+        let imp = self.imp();
+        imp.selected_category.set(category_index as i32);
+
+        imp.fill_generation.set(imp.fill_generation.get() + 1);
+        while let Some(child) = imp.content_grid.first_child() {
+            imp.content_grid.remove(&child);
+        }
+        let catalog = imp.catalog.get().expect("catalog");
+        let Some(cat) = catalog.categories.get(category_index) else {
+            return;
+        };
+        let indices: Vec<usize> = catalog
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| it.kind == cat.kind && it.category_id == cat.id)
+            .map(|(i, _)| i)
+            .collect();
+        let favs = imp.favorites.borrow().clone();
+        imp.content_stack.set_visible_child_name("grid");
+        self.fill_grid(indices, &imp.content_grid, &favs);
+    }
+
+    /// Fill a grid progressively: FILL_CHUNK cards per idle tick so a
+    /// 1800-card category never blocks the UI. A generation counter makes
+    /// stale fillers (category switch, new search) stop immediately.
+    fn fill_grid(&self, mut indices: Vec<usize>, flowbox: &gtk::FlowBox, favs: &[String]) {
+        let imp = self.imp();
+        imp.fill_generation.set(imp.fill_generation.get() + 1);
+        let generation = imp.fill_generation.get();
+        indices.reverse(); // pop() from the end preserves order
+        let remaining = std::rc::Rc::new(RefCell::new(indices));
+        let flowbox = flowbox.clone();
+        let favs = favs.to_vec();
+        let win = self.downgrade();
+        glib::idle_add_local(move || {
+            let Some(window) = win.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let i = window.imp();
+            if i.fill_generation.get() != generation {
+                return glib::ControlFlow::Break;
+            }
+            let mut rem = remaining.borrow_mut();
+            for _ in 0..FILL_CHUNK {
+                let Some(idx) = rem.pop() else {
+                    return glib::ControlFlow::Break;
+                };
+                let Some(item) = i.catalog.get().and_then(|c| c.items.get(idx)) else {
+                    continue;
+                };
+                flowbox.append(&content_card(item, &favs, win.clone()));
+            }
+            if rem.is_empty() {
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+    }
+
+    fn toggle_fav(&self, name: &str) -> bool {
         let imp = self.imp();
         {
             let mut favs = imp.favorites.borrow_mut();
@@ -590,14 +731,10 @@ impl Window {
         }
         let is_fav = imp.favorites.borrow().iter().any(|n| n == name);
         self.rebuild_favorites();
-        for c in imp.channels.borrow().iter() {
-            if c.name == name {
-                set_heart_active(&c.heart, is_fav);
-            }
-        }
         if imp.current.borrow().as_deref() == Some(name) {
             set_heart_active(&imp.player_heart, is_fav);
         }
+        is_fav
     }
 
     /// Rebuild the pinned Favorites section from the in-memory list; the
@@ -719,27 +856,6 @@ impl Window {
             .set(imp.controls_generation.get() + 1);
     }
 
-    /// Show a category's content as a card grid in the middle pane.
-    fn select_category(&self, group: i32) {
-        let imp = self.imp();
-        imp.selected_category.set(group);
-
-        while let Some(child) = imp.content_grid.first_child() {
-            imp.content_grid.remove(&child);
-        }
-        for c in imp.channels.borrow().iter() {
-            if c.group == group {
-                imp.content_grid.append(&content_card(&c.name));
-            }
-        }
-        imp.content_stack.set_visible_child_name("grid");
-
-        // Keep the sidebar in sync: a selected category is expanded.
-        if self.collapsed(group) {
-            self.toggle_group(group);
-        }
-    }
-
     fn toggle_mute(&self) {
         let imp = self.imp();
         imp.muted.set(!imp.muted.get());
@@ -759,6 +875,61 @@ impl Window {
     }
 }
 
+fn content_card(item: &Item, favs: &[String], win: glib::WeakRef<Window>) -> gtk::FlowBoxChild {
+    let is_fav = favs.iter().any(|n| n == &item.name);
+
+    let art = gtk::Box::builder()
+        .css_classes(["card"])
+        .width_request(150)
+        .height_request(90)
+        .build();
+    art.append(
+        &gtk::Image::builder()
+            .icon_name("video-display-symbolic")
+            .pixel_size(56)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .build(),
+    );
+    let heart = gtk::Button::builder()
+        .icon_name("rtv-heart-symbolic")
+        .tooltip_text("Toggle favorite")
+        .css_classes(["flat", "heart-btn"])
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::Start)
+        .margin_top(2)
+        .margin_end(2)
+        .build();
+    set_heart_active(&heart, is_fav);
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&art));
+    overlay.add_overlay(&heart);
+
+    let label = gtk::Label::builder()
+        .label(&item.name)
+        .wrap(true)
+        .justify(gtk::Justification::Center)
+        .halign(gtk::Align::Center)
+        .max_width_chars(16)
+        .build();
+    let b = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .build();
+    b.append(&overlay);
+    b.append(&label);
+
+    let card_name = item.name.clone();
+    heart.connect_clicked(move |button| {
+        if let Some(win) = win.upgrade() {
+            let is_fav = win.toggle_fav(&card_name);
+            set_heart_active(button, is_fav);
+        }
+    });
+
+    gtk::FlowBoxChild::builder().child(&b).build()
+}
+
 fn first_label(container: &gtk::Box) -> Option<String> {
     let mut child = container.first_child();
     while let Some(widget) = child {
@@ -770,52 +941,9 @@ fn first_label(container: &gtk::Box) -> Option<String> {
     None
 }
 
-fn row_heart(container: &gtk::Box) -> gtk::Button {
-    let mut found = None;
-    let mut child = container.first_child();
-    while let Some(widget) = child {
-        if let Some(button) = widget.downcast_ref::<gtk::Button>() {
-            found = Some(button.clone());
-        }
-        child = widget.next_sibling();
-    }
-    found.expect("channel row has a heart button")
-}
-
 fn row_label(row: &gtk::ListBoxRow) -> Option<String> {
     let container = row.child().and_downcast::<gtk::Box>()?;
     first_label(&container)
-}
-
-fn content_card(name: &str) -> gtk::FlowBoxChild {
-    let art = gtk::Box::builder()
-        .css_classes(["card"])
-        .width_request(150)
-        .height_request(90)
-        .valign(gtk::Align::Center)
-        .build();
-    art.append(
-        &gtk::Image::builder()
-            .icon_name("video-display-symbolic")
-            .pixel_size(56)
-            .halign(gtk::Align::Center)
-            .valign(gtk::Align::Center)
-            .build(),
-    );
-    let label = gtk::Label::builder()
-        .label(name)
-        .wrap(true)
-        .justify(gtk::Justification::Center)
-        .halign(gtk::Align::Center)
-        .max_width_chars(16)
-        .build();
-    let b = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(6)
-        .build();
-    b.append(&art);
-    b.append(&label);
-    gtk::FlowBoxChild::builder().child(&b).build()
 }
 
 fn set_heart_active(button: &gtk::Button, active: bool) {
