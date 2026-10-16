@@ -23,7 +23,6 @@ pub struct HeaderRow {
 pub struct CategoryRow {
     row: gtk::ListBoxRow,
     category_index: usize,
-    name: String,
     group: i32,
 }
 
@@ -164,6 +163,12 @@ impl Window {
         window.setup_actions();
         window.setup_browse();
         window.imp().selected_category.set(-1);
+        // Live expanded, Series/Movies collapsed on first open.
+        {
+            let mut collapsed = window.imp().collapsed.borrow_mut();
+            collapsed.clear();
+            collapsed.extend(Kind::ALL.iter().enumerate().map(|(i, _)| i != 0));
+        }
         window
     }
 
@@ -269,6 +274,9 @@ impl Window {
             let Some(win) = win.upgrade() else { return };
             if win.is_fullscreen() {
                 win.unfullscreen();
+            } else if !win.imp().query.borrow().trim().is_empty() {
+                // Outside fullscreen, Escape resets the search instead.
+                win.imp().search_entry.set_text("");
             }
         });
         self.add_action(&exit_fullscreen);
@@ -360,6 +368,10 @@ impl Window {
             if let Some(win) = win.upgrade() {
                 win.apply_search(&entry.text());
             }
+        });
+        // Escape inside the search field resets the search.
+        imp.search_entry.connect_stop_search(move |entry| {
+            entry.set_text("");
         });
 
         // Leaving the player page (back button / pop) resets player state.
@@ -501,6 +513,13 @@ impl Window {
                 .build();
             header_box.append(&chevron);
             header_box.append(
+                &gtk::Image::builder()
+                    .icon_name(kind.icon())
+                    .pixel_size(14)
+                    .valign(gtk::Align::Center)
+                    .build(),
+            );
+            header_box.append(
                 &gtk::Label::builder()
                     .label(format!("{} · {}", kind.title(), cats.len()))
                     .xalign(0.0)
@@ -543,7 +562,6 @@ impl Window {
                 imp.categories.borrow_mut().push(CategoryRow {
                     row,
                     category_index: cat_index,
-                    name: cat.name.clone(),
                     group,
                 });
             }
@@ -611,7 +629,7 @@ impl Window {
             .collect();
         let favs = imp.favorites.borrow().clone();
         imp.content_stack.set_visible_child_name("search");
-        self.fill_grid(indices, &imp.search_grid, &favs);
+        self.fill_grid(indices, &imp.search_grid, &favs, true);
     }
 
     /// Visibility of every sidebar row, driven by the search query and the
@@ -628,17 +646,13 @@ impl Window {
                 h.row.set_visible(true);
             }
         } else {
-            let n_groups = imp.headers.borrow().len();
-            let mut counts = vec![0usize; n_groups];
+            // Search filters CONTENT (the middle grid), not the sidebar:
+            // every section and category stays visible while searching.
             for c in imp.categories.borrow().iter() {
-                let matches = c.name.to_lowercase().contains(&q);
-                c.row.set_visible(matches);
-                if matches && c.group >= 0 {
-                    counts[c.group as usize] += 1;
-                }
+                c.row.set_visible(true);
             }
             for h in imp.headers.borrow().iter() {
-                h.row.set_visible(counts[h.group as usize] > 0);
+                h.row.set_visible(true);
             }
         }
 
@@ -678,13 +692,19 @@ impl Window {
             .collect();
         let favs = imp.favorites.borrow().clone();
         imp.content_stack.set_visible_child_name("grid");
-        self.fill_grid(indices, &imp.content_grid, &favs);
+        self.fill_grid(indices, &imp.content_grid, &favs, false);
     }
 
     /// Fill a grid progressively: FILL_CHUNK cards per idle tick so a
     /// 1800-card category never blocks the UI. A generation counter makes
     /// stale fillers (category switch, new search) stop immediately.
-    fn fill_grid(&self, mut indices: Vec<usize>, flowbox: &gtk::FlowBox, favs: &[String]) {
+    fn fill_grid(
+        &self,
+        mut indices: Vec<usize>,
+        flowbox: &gtk::FlowBox,
+        favs: &[String],
+        with_categories: bool,
+    ) {
         let imp = self.imp();
         imp.fill_generation.set(imp.fill_generation.get() + 1);
         let generation = imp.fill_generation.get();
@@ -709,7 +729,24 @@ impl Window {
                 let Some(item) = i.catalog.get().and_then(|c| c.items.get(idx)) else {
                     continue;
                 };
-                flowbox.append(&content_card(item, &favs, win.clone()));
+                let category_label = with_categories
+                    .then(|| {
+                        i.catalog
+                            .get()
+                            .and_then(|c| {
+                                c.categories
+                                    .iter()
+                                    .find(|cat| cat.kind == item.kind && cat.id == item.category_id)
+                            })
+                            .map(|cat| cat.name.clone())
+                    })
+                    .flatten();
+                flowbox.append(&content_card(
+                    item,
+                    &favs,
+                    category_label.as_deref(),
+                    win.clone(),
+                ));
             }
             if rem.is_empty() {
                 glib::ControlFlow::Break
@@ -875,7 +912,12 @@ impl Window {
     }
 }
 
-fn content_card(item: &Item, favs: &[String], win: glib::WeakRef<Window>) -> gtk::FlowBoxChild {
+fn content_card(
+    item: &Item,
+    favs: &[String],
+    category_label: Option<&str>,
+    win: glib::WeakRef<Window>,
+) -> gtk::FlowBoxChild {
     let is_fav = favs.iter().any(|n| n == &item.name);
 
     let art = gtk::Box::builder()
@@ -883,14 +925,16 @@ fn content_card(item: &Item, favs: &[String], win: glib::WeakRef<Window>) -> gtk
         .width_request(150)
         .height_request(90)
         .build();
-    art.append(
-        &gtk::Image::builder()
-            .icon_name("video-display-symbolic")
-            .pixel_size(56)
-            .halign(gtk::Align::Center)
-            .valign(gtk::Align::Center)
-            .build(),
-    );
+    let placeholder = gtk::Image::builder()
+        .icon_name("video-display-symbolic")
+        .pixel_size(56)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .build();
+    let picture = gtk::Picture::builder()
+        .content_fit(gtk::ContentFit::Cover)
+        .visible(false)
+        .build();
     let heart = gtk::Button::builder()
         .icon_name("rtv-heart-symbolic")
         .tooltip_text("Toggle favorite")
@@ -903,7 +947,25 @@ fn content_card(item: &Item, favs: &[String], win: glib::WeakRef<Window>) -> gtk
     set_heart_active(&heart, is_fav);
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&art));
+    overlay.add_overlay(&placeholder);
+    overlay.add_overlay(&picture);
     overlay.add_overlay(&heart);
+
+    // Cover artwork: fetch-on-demand with a persistent disk cache; the
+    // placeholder stays until the fetch succeeds and on any failure.
+    if let Some(url) = &item.icon {
+        let picture = picture.clone();
+        let placeholder = placeholder.clone();
+        crate::covers::fetch(url.clone(), move |path| {
+            if let Some(path) = path {
+                if let Ok(texture) = gtk::gdk::Texture::from_filename(&path) {
+                    picture.set_paintable(Some(&texture));
+                    picture.set_visible(true);
+                    placeholder.set_visible(false);
+                }
+            }
+        });
+    }
 
     let label = gtk::Label::builder()
         .label(&item.name)
@@ -918,6 +980,18 @@ fn content_card(item: &Item, favs: &[String], win: glib::WeakRef<Window>) -> gtk
         .build();
     b.append(&overlay);
     b.append(&label);
+    if let Some(category) = category_label {
+        b.append(
+            &gtk::Label::builder()
+                .label(category)
+                .wrap(true)
+                .justify(gtk::Justification::Center)
+                .halign(gtk::Align::Center)
+                .max_width_chars(16)
+                .css_classes(["caption", "dim-label"])
+                .build(),
+        );
+    }
 
     let card_name = item.name.clone();
     heart.connect_clicked(move |button| {

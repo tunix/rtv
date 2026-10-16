@@ -21,6 +21,14 @@ impl Kind {
             Kind::Vod => "Movies",
         }
     }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Kind::Live => "video-display-symbolic",
+            Kind::Series => "folder-videos-symbolic",
+            Kind::Vod => "video-x-generic-symbolic",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
