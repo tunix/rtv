@@ -1,4 +1,5 @@
 mod app;
+mod sample;
 mod ui;
 
 use gtk::gio;

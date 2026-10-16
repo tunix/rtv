@@ -76,6 +76,9 @@ pub fn run() {
 
         let window = ui::window::Window::new(app);
         window.present();
+        if window.sample_catalog_missing() {
+            window.toast("samples/ not found — mock catalog is empty");
+        }
     });
 
     let quit = gio::SimpleAction::new("quit", None);

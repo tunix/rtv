@@ -97,265 +97,6 @@ template $RtvWindow : Adw.ApplicationWindow {
 
                   child: Gtk.ListBox content_list {
                     styles ["navigation-sidebar"]
-
-                    Gtk.ListBoxRow {
-                      activatable: false;
-                      selectable: false;
-
-                      child: Gtk.Box {
-                        spacing: 6;
-
-                        Gtk.Image {
-                          icon-name: "chevron-down-symbolic";
-                          pixel-size: 14;
-                          valign: center;
-                        }
-
-                        Gtk.Label {
-                          label: _("Live");
-                          xalign: 0;
-                          styles ["caption", "dim-label"]
-                        }
-                      };
-                    }
-
-                    Gtk.ListBoxRow {
-                      child: Gtk.Box {
-                        spacing: 12;
-                        margin-start: 26;
-
-                        Gtk.Image {
-                          icon-name: "video-display-symbolic";
-                          pixel-size: 16;
-                          valign: center;
-                        }
-
-                        Gtk.Label {
-                          label: "News 24";
-                          halign: start;
-                          ellipsize: end;
-                        }
-
-                        Gtk.Button {
-                          icon-name: "rtv-heart-symbolic";
-                          tooltip-text: _("Toggle favorite");
-                          valign: center;
-                          halign: end;
-                          hexpand: true;
-                          styles ["flat", "heart-btn"]
-                        }
-                      };
-                    }
-
-                    Gtk.ListBoxRow {
-                      child: Gtk.Box {
-                        spacing: 12;
-                        margin-start: 26;
-
-                        Gtk.Image {
-                          icon-name: "video-display-symbolic";
-                          pixel-size: 16;
-                          valign: center;
-                        }
-
-                        Gtk.Label {
-                          label: "National Geo HD";
-                          halign: start;
-                          ellipsize: end;
-                        }
-
-                        Gtk.Button {
-                          icon-name: "rtv-heart-symbolic";
-                          tooltip-text: _("Toggle favorite");
-                          valign: center;
-                          halign: end;
-                          hexpand: true;
-                          styles ["flat", "heart-btn"]
-                        }
-                      };
-                    }
-
-                    Gtk.ListBoxRow {
-                      child: Gtk.Box {
-                        spacing: 12;
-                        margin-start: 26;
-
-                        Gtk.Image {
-                          icon-name: "video-display-symbolic";
-                          pixel-size: 16;
-                          valign: center;
-                        }
-
-                        Gtk.Label {
-                          label: "Discovery";
-                          halign: start;
-                          ellipsize: end;
-                        }
-
-                        Gtk.Button {
-                          icon-name: "rtv-heart-symbolic";
-                          tooltip-text: _("Toggle favorite");
-                          valign: center;
-                          halign: end;
-                          hexpand: true;
-                          styles ["flat", "heart-btn"]
-                        }
-                      };
-                    }
-
-                    Gtk.ListBoxRow {
-                      activatable: false;
-                      selectable: false;
-
-                      child: Gtk.Box {
-                        spacing: 6;
-
-                        Gtk.Image {
-                          icon-name: "chevron-down-symbolic";
-                          pixel-size: 14;
-                          valign: center;
-                        }
-
-                        Gtk.Label {
-                          label: _("Sports");
-                          xalign: 0;
-                          styles ["caption", "dim-label"]
-                        }
-                      };
-                    }
-
-                    Gtk.ListBoxRow {
-                      child: Gtk.Box {
-                        spacing: 12;
-                        margin-start: 26;
-
-                        Gtk.Image {
-                          icon-name: "video-display-symbolic";
-                          pixel-size: 16;
-                          valign: center;
-                        }
-
-                        Gtk.Label {
-                          label: "Sports HD";
-                          halign: start;
-                          ellipsize: end;
-                        }
-
-                        Gtk.Button {
-                          icon-name: "rtv-heart-symbolic";
-                          tooltip-text: _("Toggle favorite");
-                          valign: center;
-                          halign: end;
-                          hexpand: true;
-                          styles ["flat", "heart-btn"]
-                        }
-                      };
-                    }
-
-                    Gtk.ListBoxRow {
-                      child: Gtk.Box {
-                        spacing: 12;
-                        margin-start: 26;
-
-                        Gtk.Image {
-                          icon-name: "video-display-symbolic";
-                          pixel-size: 16;
-                          valign: center;
-                        }
-
-                        Gtk.Label {
-                          label: "Bein Sports 1";
-                          halign: start;
-                          ellipsize: end;
-                        }
-
-                        Gtk.Button {
-                          icon-name: "rtv-heart-symbolic";
-                          tooltip-text: _("Toggle favorite");
-                          valign: center;
-                          halign: end;
-                          hexpand: true;
-                          styles ["flat", "heart-btn"]
-                        }
-                      };
-                    }
-
-                    Gtk.ListBoxRow {
-                      activatable: false;
-                      selectable: false;
-
-                      child: Gtk.Box {
-                        spacing: 6;
-
-                        Gtk.Image {
-                          icon-name: "chevron-down-symbolic";
-                          pixel-size: 14;
-                          valign: center;
-                        }
-
-                        Gtk.Label {
-                          label: _("Movies");
-                          xalign: 0;
-                          styles ["caption", "dim-label"]
-                        }
-                      };
-                    }
-
-                    Gtk.ListBoxRow {
-                      child: Gtk.Box {
-                        spacing: 12;
-                        margin-start: 26;
-
-                        Gtk.Image {
-                          icon-name: "video-display-symbolic";
-                          pixel-size: 16;
-                          valign: center;
-                        }
-
-                        Gtk.Label {
-                          label: "Cinema One";
-                          halign: start;
-                          ellipsize: end;
-                        }
-
-                        Gtk.Button {
-                          icon-name: "rtv-heart-symbolic";
-                          tooltip-text: _("Toggle favorite");
-                          valign: center;
-                          halign: end;
-                          hexpand: true;
-                          styles ["flat", "heart-btn"]
-                        }
-                      };
-                    }
-
-                    Gtk.ListBoxRow {
-                      child: Gtk.Box {
-                        spacing: 12;
-                        margin-start: 26;
-
-                        Gtk.Image {
-                          icon-name: "video-display-symbolic";
-                          pixel-size: 16;
-                          valign: center;
-                        }
-
-                        Gtk.Label {
-                          label: "Action Movies";
-                          halign: start;
-                          ellipsize: end;
-                        }
-
-                        Gtk.Button {
-                          icon-name: "rtv-heart-symbolic";
-                          tooltip-text: _("Toggle favorite");
-                          valign: center;
-                          halign: end;
-                          hexpand: true;
-                          styles ["flat", "heart-btn"]
-                        }
-                      };
-                    }
                   };
                 }
               };
@@ -386,6 +127,31 @@ template $RtvWindow : Adw.ApplicationWindow {
                       maximum-size: 1000;
 
                       child: Gtk.FlowBox content_grid {
+                        margin-top: 12;
+                        margin-start: 12;
+                        margin-end: 12;
+                        margin-bottom: 12;
+                        column-spacing: 12;
+                        row-spacing: 12;
+                        min-children-per-line: 3;
+                        max-children-per-line: 5;
+                        activate-on-single-click: true;
+                        selection-mode: none;
+                        valign: start;
+                      };
+                    };
+                  };
+                }
+
+                Gtk.StackPage {
+                  name: "search";
+                  child: Gtk.ScrolledWindow {
+                    hscrollbar-policy: never;
+
+                    child: Adw.Clamp {
+                      maximum-size: 1000;
+
+                      child: Gtk.FlowBox search_grid {
                         margin-top: 12;
                         margin-start: 12;
                         margin-end: 12;

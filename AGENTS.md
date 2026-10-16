@@ -23,6 +23,7 @@ IPTV player for the GNOME desktop. Rust + GTK4/libadwaita, Xtream Codes first, M
 - Iterate on UI mocks in `resources/*.blp` before wiring business logic; empty states must always look intentional.
 - Terminology: the UI says "content", never "channel" (Xtream/M3U carry more than live TV).
 - Loading policy: adding a source shows the UI immediately and streams content in progressively; later launches render from the local cache first and refresh async in the background. Never block the user on loading, but always surface progress.
+- Mock phase: `src/sample.rs` feeds the UI from `samples/*.json` (gitignored dumps). Grids fill progressively via generation-guarded idle chunks (`Window::fill_grid`) — never render a 24k-item category in one pass.
 - Artwork/covers are cached locally; on any fetch failure use placeholder art, degrade gracefully, and NEVER crash.
 - Xtream categories are flat (parent_id=0) and M3U nests by group-title; the real tree will be modeled after the dumps in `samples/` (gitignored — never commit them, they contain credentials).
 - Data model (confirmed from samples/): Xtream sections (live/series/vod) each carry their OWN flat category list (parent_id=0, no hierarchy). Nesting is: section → category → content; series add one more level: series → seasons[] → episodes{} (episodes dict is keyed by season STRING and may omit special seasons that appear in `seasons[]` — handle missing keys).
