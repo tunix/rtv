@@ -1,5 +1,6 @@
 mod app;
 mod covers;
+mod details;
 mod sample;
 mod ui;
 

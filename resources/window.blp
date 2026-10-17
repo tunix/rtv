@@ -77,27 +77,6 @@ template $RtvWindow : Adw.ApplicationWindow {
                   placeholder-text: _("Search content…");
                 }
 
-                Gtk.Label favorites_title {
-                  label: _("Favorites");
-                  xalign: 0;
-                  margin-start: 10;
-                  margin-top: 8;
-                  styles ["caption", "dim-label"]
-                }
-
-                Gtk.ListBox favorites_list {
-                  styles ["navigation-sidebar"]
-                }
-
-                Gtk.Button clear_favorites {
-                  label: _("Clear all");
-                  halign: start;
-                  margin-start: 10;
-                  margin-top: 4;
-                  tooltip-text: _("Remove all favorites");
-                  styles ["flat", "dim-label"]
-                }
-
                 Gtk.ScrolledWindow {
                   vexpand: true;
                   hscrollbar-policy: never;
@@ -172,6 +151,63 @@ template $RtvWindow : Adw.ApplicationWindow {
                         valign: start;
                       };
                     };
+                  };
+                }
+
+                /* Favorites: card grid + clear all, or an empty state. */
+                Gtk.StackPage {
+                name: "favorites";
+                child: Gtk.Stack favorites_stack {
+                  transition-type: crossfade;
+                  transition-duration: 250;
+
+                  Gtk.StackPage {
+                    name: "empty";
+                    child: Adw.StatusPage {
+                      icon-name: "emblem-favorite-symbolic";
+                      title: _("No favorites yet");
+                      description: _("Heart your favorite content to find it here.");
+                    };
+                  }
+
+                  Gtk.StackPage {
+                    name: "grid";
+                    child: Gtk.Box {
+                      orientation: vertical;
+
+                      Gtk.ScrolledWindow {
+                        vexpand: true;
+                        hscrollbar-policy: never;
+
+                        child: Adw.Clamp {
+                          maximum-size: 1000;
+
+                          child: Gtk.FlowBox favorites_grid {
+                            margin-top: 12;
+                            margin-start: 12;
+                            margin-end: 12;
+                            margin-bottom: 12;
+                            column-spacing: 12;
+                            row-spacing: 12;
+                            min-children-per-line: 3;
+                            max-children-per-line: 5;
+                            activate-on-single-click: true;
+                            selection-mode: none;
+                            valign: start;
+                          };
+                        };
+                      }
+
+                      Gtk.Button clear_favorites {
+                        label: _("Clear all");
+                        halign: center;
+                        margin-top: 6;
+                        margin-bottom: 12;
+                        tooltip-text: _("Remove all favorites");
+                        styles ["flat", "dim-label"]
+                      }
+                    };
+                  }
                   };
                 }
               };
@@ -312,6 +348,64 @@ template $RtvWindow : Adw.ApplicationWindow {
         };
       }
     };
+
+    /* Content details: series or movie body built from Rust. */
+    Adw.NavigationPage detail_page {
+      title: _("Details");
+      can-pop: true;
+
+      child: Adw.ToolbarView {
+
+        [top]
+        Adw.HeaderBar {}
+
+        content: Gtk.ScrolledWindow {
+          hscrollbar-policy: never;
+
+          child: Adw.Clamp {
+            maximum-size: 720;
+
+            child: Gtk.Box detail_content {
+              orientation: vertical;
+              spacing: 12;
+              margin-top: 12;
+              margin-start: 12;
+              margin-end: 12;
+              margin-bottom: 24;
+            };
+          };
+        };
+      };
+    }
+
+    /* Episodes of one season, pushed on top of the series details. */
+    Adw.NavigationPage episodes_page {
+      title: _("Season");
+      can-pop: true;
+
+      child: Adw.ToolbarView {
+
+        [top]
+        Adw.HeaderBar {}
+
+        content: Gtk.ScrolledWindow {
+          hscrollbar-policy: never;
+
+          child: Adw.Clamp {
+            maximum-size: 720;
+
+            child: Gtk.ListBox episodes_list {
+              margin-top: 12;
+              margin-start: 12;
+              margin-end: 12;
+              margin-bottom: 24;
+              selection-mode: none;
+              styles ["boxed-list"]
+            };
+          };
+        };
+      };
+    }
   };
 }
 

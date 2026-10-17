@@ -2,7 +2,10 @@
 //! and exposes them as an in-memory catalog. This exercises the UI at real
 //! scale (~30k items) before the network/SQLite backend lands.
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
+use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -45,6 +48,28 @@ pub struct Item {
     pub category_id: String,
     pub name: String,
     pub icon: Option<String>,
+    /// Textual rating when the dump carries one ("0" is treated as none).
+    pub rating: Option<String>,
+}
+
+/// Offline series metadata from `series.json`: enough for full series
+/// detail pages without any network round-trip. Fields the dump omits
+/// stay `None`.
+#[derive(Debug, Clone, Default)]
+pub struct SeriesMeta {
+    pub plot: Option<String>,
+    pub genre: Option<String>,
+    pub cast: Option<String>,
+    pub director: Option<String>,
+    pub rating: Option<String>,
+    pub release_date: Option<String>,
+    /// Stored for the upcoming player rounds (backdrop art, trailer).
+    #[allow(dead_code)]
+    pub backdrop: Option<String>,
+    #[allow(dead_code)]
+    pub trailer: Option<String>,
+    pub cover: Option<String>,
+    pub episode_run_time: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -53,6 +78,8 @@ pub struct Catalog {
     pub found: bool,
     pub categories: Vec<Category>,
     pub items: Vec<Item>,
+    /// Series id -> offline metadata (series detail pages).
+    pub series_meta: HashMap<i64, SeriesMeta>,
 }
 
 #[derive(Deserialize)]
@@ -83,6 +110,24 @@ struct XSeries {
     category_id: String,
     #[serde(rename = "cover", default)]
     icon: String,
+    #[serde(default)]
+    plot: String,
+    #[serde(default)]
+    cast: String,
+    #[serde(default)]
+    director: String,
+    #[serde(default)]
+    genre: String,
+    #[serde(default)]
+    rating: String,
+    #[serde(rename = "releaseDate", default)]
+    release_date: String,
+    #[serde(default)]
+    youtube_trailer: String,
+    #[serde(rename = "episode_run_time", default)]
+    episode_run_time: String,
+    #[serde(rename = "backdrop_path", default)]
+    backdrop: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -94,11 +139,31 @@ struct XVodStream {
     category_id: String,
     #[serde(rename = "stream_icon", default)]
     icon: String,
+    /// Ratings arrive as string, number or null depending on the panel.
+    #[serde(default)]
+    rating: Option<Value>,
 }
 
 fn read_json(path: &std::path::Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     (!text.trim().is_empty()).then_some(text)
+}
+
+/// Panels emit "" or the literal string "null" for missing metadata.
+fn non_empty(value: &str) -> Option<String> {
+    (!value.is_empty() && value != "null").then(|| value.to_string())
+}
+
+/// Rating from a lenient JSON value; "0" and null mean "no rating".
+fn rating_text(value: Option<Value>) -> Option<String> {
+    match value {
+        Some(Value::String(s)) => non_empty(&s).filter(|s| s != "0"),
+        Some(Value::Number(n)) => {
+            let s = n.to_string();
+            (s != "0").then_some(s)
+        }
+        _ => None,
+    }
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(text: &str) -> Vec<T> {
@@ -160,6 +225,7 @@ impl Catalog {
                 category_id: s.category_id.clone(),
                 name: s.name.clone(),
                 icon: (!s.icon.is_empty()).then_some(s.icon.clone()),
+                rating: None,
             });
         }
         for s in &series {
@@ -169,7 +235,23 @@ impl Catalog {
                 category_id: s.category_id.clone(),
                 name: s.name.clone(),
                 icon: (!s.icon.is_empty()).then_some(s.icon.clone()),
+                rating: non_empty(&s.rating),
             });
+            catalog.series_meta.insert(
+                s.id,
+                SeriesMeta {
+                    plot: non_empty(&s.plot),
+                    genre: non_empty(&s.genre),
+                    cast: non_empty(&s.cast),
+                    director: non_empty(&s.director),
+                    rating: non_empty(&s.rating),
+                    release_date: non_empty(&s.release_date),
+                    backdrop: s.backdrop.iter().find(|b| !b.is_empty()).cloned(),
+                    trailer: non_empty(&s.youtube_trailer),
+                    cover: (!s.icon.is_empty()).then_some(s.icon.clone()),
+                    episode_run_time: non_empty(&s.episode_run_time),
+                },
+            );
         }
         for s in &vod_streams {
             catalog.items.push(Item {
@@ -178,6 +260,7 @@ impl Catalog {
                 category_id: s.category_id.clone(),
                 name: s.name.clone(),
                 icon: (!s.icon.is_empty()).then_some(s.icon.clone()),
+                rating: rating_text(s.rating.clone()),
             });
         }
 

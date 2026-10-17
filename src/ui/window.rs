@@ -2,6 +2,7 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 use std::cell::RefCell;
 
+use crate::details::{self, Episode, SeriesInfo};
 use crate::sample::{self, Item, Kind};
 
 /// Search results are capped so a one-letter query cannot flood the grid;
@@ -60,10 +61,6 @@ mod imp {
         #[template_child]
         pub search_entry: TemplateChild<gtk::SearchEntry>,
         #[template_child]
-        pub favorites_title: TemplateChild<gtk::Label>,
-        #[template_child]
-        pub favorites_list: TemplateChild<gtk::ListBox>,
-        #[template_child]
         pub clear_favorites: TemplateChild<gtk::Button>,
         #[template_child]
         pub content_list: TemplateChild<gtk::ListBox>,
@@ -100,11 +97,23 @@ mod imp {
         #[template_child]
         pub content_grid: TemplateChild<gtk::FlowBox>,
         #[template_child]
+        pub favorites_grid: TemplateChild<gtk::FlowBox>,
+        #[template_child]
         pub search_grid: TemplateChild<gtk::FlowBox>,
+        #[template_child]
+        pub favorites_stack: TemplateChild<gtk::Stack>,
         #[template_child]
         pub content_title: TemplateChild<gtk::Label>,
         #[template_child]
         pub content_status: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub detail_page: TemplateChild<adw::NavigationPage>,
+        #[template_child]
+        pub detail_content: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub episodes_page: TemplateChild<adw::NavigationPage>,
+        #[template_child]
+        pub episodes_list: TemplateChild<gtk::ListBox>,
 
         /// Sample catalog loaded from samples/ (mock phase).
         pub catalog: OnceLock<Catalog>,
@@ -121,6 +130,11 @@ mod imp {
         pub query: RefCell<String>,
         pub categories: RefCell<Vec<CategoryRow>>,
         pub headers: RefCell<Vec<HeaderRow>>,
+        /// Pinned "Favorites" sidebar row, always visible above the sections.
+        pub favorites_row: RefCell<Option<gtk::ListBoxRow>>,
+        /// Its row index, used to dispatch row activation before the
+        /// category lookup.
+        pub favorites_row_index: Cell<i32>,
         pub dropdown: RefCell<Option<gtk::DropDown>>,
         /// Bumped on every show/cancel; only the timer matching the latest
         /// generation may hide the controls (stale timers must no-op, since
@@ -128,6 +142,9 @@ mod imp {
         pub controls_generation: Cell<u64>,
         /// Bumped on every grid (re)fill; stale chunk fillers no-op.
         pub fill_generation: Cell<u64>,
+        /// Bumped on every open_details; stale async detail fillers no-op
+        /// instead of touching a page that already shows other content.
+        pub details_generation: Cell<u64>,
     }
 
     #[glib::object_subclass]
@@ -311,13 +328,31 @@ impl Window {
         imp.dropdown_box.append(&dropdown);
         imp.dropdown.replace(Some(dropdown));
 
+        // Pinned Favorites row at the very top of the sidebar: always
+        // visible, unaffected by section collapse and search filtering.
+        let favorites_row = gtk::ListBoxRow::new();
+        favorites_row.set_child(Some(
+            &gtk::Label::builder()
+                .label("Favorites (0)")
+                .halign(gtk::Align::Start)
+                .margin_start(6)
+                .build(),
+        ));
+        imp.content_list.prepend(&favorites_row);
+        imp.favorites_row.replace(Some(favorites_row.clone()));
+        imp.favorites_row_index.set(favorites_row.index());
+
         self.setup_sidebar();
 
-        // Sidebar category activation -> content grid in the middle.
+        // Sidebar activation: the Favorites row first, then categories.
         let win = self.downgrade();
         imp.content_list.connect_row_activated(move |_, row| {
             let Some(win) = win.upgrade() else { return };
             let i = win.imp();
+            if row.index() == i.favorites_row_index.get() {
+                win.show_favorites();
+                return;
+            }
             let index = row.index();
             let target = i
                 .categories
@@ -330,12 +365,14 @@ impl Window {
             }
         });
 
-        // Favorites activation -> the player.
+        // Favorites cards -> the player.
         let win = self.downgrade();
-        imp.favorites_list.connect_row_activated(move |_, row| {
+        imp.favorites_grid.connect_child_activated(move |_, child| {
             if let Some(win) = win.upgrade() {
-                if let Some(name) = row_label(row) {
-                    win.play(&name);
+                if let Some(b) = child.child().and_downcast::<gtk::Box>() {
+                    if let Some(name) = first_label(&b) {
+                        win.play(&name);
+                    }
                 }
             }
         });
@@ -662,18 +699,8 @@ impl Window {
             }
         }
 
-        // Favorites follow the same query.
-        let mut child = imp.favorites_list.first_child();
-        while let Some(widget) = child {
-            child = widget.next_sibling();
-            if let Some(row) = widget.downcast_ref::<gtk::ListBoxRow>() {
-                let matches = q.is_empty()
-                    || row_label(row)
-                        .map(|n| n.to_lowercase().contains(&q))
-                        .unwrap_or(false);
-                row.set_visible(matches);
-            }
-        }
+        // The pinned Favorites row is not touched: it stays visible in
+        // every collapse and search state.
     }
 
     /// Show a category's content as a card grid in the middle pane.
@@ -780,45 +807,46 @@ impl Window {
         is_fav
     }
 
-    /// Rebuild the pinned Favorites section from the in-memory list. The
-    /// section is always visible (title + list, even when empty); the
-    /// "Clear all" button stays insensitive while there is nothing to clear.
+    /// Switch the middle pane to the favorites grid.
+    fn show_favorites(&self) {
+        self.imp().content_stack.set_visible_child_name("favorites");
+    }
+
+    /// Refresh everything favorites-related: the pinned sidebar row label
+    /// (with count), the favorites page (grid vs. empty status) and the
+    /// "Clear all" sensitivity. Favorite counts are small, so the grid
+    /// refills synchronously instead of going through the chunk filler.
     fn rebuild_favorites(&self) {
         let imp = self.imp();
-        while let Some(child) = imp.favorites_list.first_child() {
-            imp.favorites_list.remove(&child);
-        }
-        let empty = imp.favorites.borrow().is_empty();
-        imp.clear_favorites.set_sensitive(!empty);
+        let favs = imp.favorites.borrow().clone();
+        let count = favs.len();
 
-        for name in imp.favorites.borrow().iter() {
-            let row = gtk::ListBoxRow::new();
-            let b = gtk::Box::builder().spacing(12).build();
-            let heart = gtk::Button::builder()
-                .icon_name("rtv-heart-symbolic")
-                .tooltip_text("Remove from favorites")
-                .css_classes(["flat", "heart-btn", "active"])
-                .valign(gtk::Align::Center)
-                .build();
-            let label = gtk::Label::builder()
-                .label(name)
-                .halign(gtk::Align::Start)
-                .ellipsize(gtk::pango::EllipsizeMode::End)
-                .build();
-            b.append(&heart);
-            b.append(&label);
-            row.set_child(Some(&b));
-
-            let win = self.downgrade();
-            let name = name.clone();
-            heart.connect_clicked(move |_| {
-                if let Some(win) = win.upgrade() {
-                    win.toggle_fav(&name);
-                }
-            });
-            imp.favorites_list.append(&row);
+        if let Some(row) = imp.favorites_row.borrow().as_ref() {
+            if let Some(label) = row.child().and_downcast::<gtk::Label>() {
+                label.set_text(&format!("Favorites ({count})"));
+            }
         }
-        self.refresh_rows_visibility();
+        imp.clear_favorites.set_sensitive(count > 0);
+        imp.favorites_stack
+            .set_visible_child_name(if count == 0 { "empty" } else { "grid" });
+
+        while let Some(child) = imp.favorites_grid.first_child() {
+            imp.favorites_grid.remove(&child);
+        }
+        let win = self.downgrade();
+        for name in &favs {
+            // Items are looked up by name; a name without a catalog match
+            // still gets a bare card (no cover, no kind action).
+            let card = match imp
+                .catalog
+                .get()
+                .and_then(|c| c.items.iter().find(|it| &it.name == name))
+            {
+                Some(item) => content_card(item, &favs, None, win.clone()),
+                None => name_card(name, &favs, win.clone()),
+            };
+            imp.favorites_grid.append(&card);
+        }
     }
 
     fn play(&self, name: &str) {
@@ -834,6 +862,359 @@ impl Window {
         imp.on_player.set(true);
         imp.main_view.push(&*imp.player_page);
         self.show_controls();
+    }
+
+    /// Open the content detail page for a Series/Movies card. Live cards
+    /// have a play button instead and never reach this. The page body is
+    /// rebuilt on every call; a generation counter neutralizes detail
+    /// fetches that outlive the page they were started for.
+    fn open_details(&self, kind: Kind, id: i64, name: &str) {
+        let imp = self.imp();
+        let Some(item) = imp
+            .catalog
+            .get()
+            .and_then(|c| c.items.iter().find(|it| it.kind == kind && it.id == id))
+        else {
+            return;
+        };
+        imp.details_generation.set(imp.details_generation.get() + 1);
+        let generation = imp.details_generation.get();
+        imp.detail_page.set_title(name);
+
+        while let Some(child) = imp.detail_content.first_child() {
+            imp.detail_content.remove(&child);
+        }
+        while let Some(child) = imp.episodes_list.first_child() {
+            imp.episodes_list.remove(&child);
+        }
+
+        match kind {
+            Kind::Live => return,
+            Kind::Series => self.open_series_details(id, name, item.icon.as_deref(), generation),
+            Kind::Vod => self.open_vod_details(
+                id,
+                name,
+                item.rating.clone(),
+                item.icon.as_deref(),
+                generation,
+            ),
+        }
+        imp.main_view.push(&*imp.detail_page);
+    }
+
+    /// Series body: offline metadata from series.json on top, seasons list
+    /// filled in by the async get_series_info fetch.
+    fn open_series_details(&self, id: i64, name: &str, cover: Option<&str>, generation: u64) {
+        let imp = self.imp();
+        let meta = imp
+            .catalog
+            .get()
+            .and_then(|c| c.series_meta.get(&id).cloned())
+            .unwrap_or_default();
+
+        imp.detail_content.append(&detail_header(
+            name,
+            cover.or(meta.cover.as_deref()),
+            &[meta.genre, meta.rating, meta.release_date],
+            meta.cast.as_deref(),
+            meta.director.as_deref(),
+            meta.episode_run_time.as_deref(),
+        ));
+
+        if let Some(plot) = &meta.plot {
+            imp.detail_content.append(&plot_label(plot));
+        }
+
+        imp.detail_content.append(
+            &gtk::Label::builder()
+                .label("Seasons")
+                .halign(gtk::Align::Start)
+                .css_classes(["title-3"])
+                .build(),
+        );
+        let seasons_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .build();
+        seasons_box.append(
+            &gtk::Spinner::builder()
+                .spinning(true)
+                .halign(gtk::Align::Center)
+                .valign(gtk::Align::Center)
+                .margin_top(12)
+                .margin_bottom(12)
+                .build(),
+        );
+        imp.detail_content.append(&seasons_box);
+
+        let win = self.downgrade();
+        let seasons_box = seasons_box.clone();
+        details::series_info(id, move |result| {
+            let Some(win) = win.upgrade() else {
+                return;
+            };
+            let i = win.imp();
+            if i.details_generation.get() != generation {
+                return;
+            }
+            win.fill_seasons(&seasons_box, result);
+        });
+    }
+
+    /// Replace the seasons spinner with the season rows (or a graceful
+    /// empty/failure state). Runs on the main loop from the fetch callback.
+    fn fill_seasons(&self, seasons_box: &gtk::Box, result: Option<SeriesInfo>) {
+        while let Some(child) = seasons_box.first_child() {
+            seasons_box.remove(&child);
+        }
+        let Some(info) = result else {
+            self.toast("Could not load series details");
+            seasons_box.append(&dim_label(
+                "Season information could not be loaded. Try again later.",
+            ));
+            return;
+        };
+        if info.seasons.is_empty() {
+            seasons_box.append(&dim_label("No season information available."));
+            return;
+        }
+
+        let list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .css_classes(["boxed-list"])
+            .build();
+        for season in &info.seasons {
+            let count = season.episode_count.or_else(|| {
+                info.episodes
+                    .get(&season.number)
+                    .map(|episodes| episodes.len() as i64)
+            });
+            let title = match count {
+                Some(1) => format!("Season {} — 1 episode", season.number),
+                Some(n) => format!("Season {} — {n} episodes", season.number),
+                None => format!("Season {}", season.number),
+            };
+
+            let row = adw::ActionRow::new();
+            let row_box = gtk::Box::builder()
+                .spacing(12)
+                .margin_top(8)
+                .margin_bottom(8)
+                .margin_start(12)
+                .margin_end(12)
+                .build();
+            if let Some(cover) = &season.cover {
+                row_box.prepend(&cover_art(Some(cover), 34, 51));
+            }
+            row_box.append(
+                &gtk::Label::builder()
+                    .label(title)
+                    .halign(gtk::Align::Start)
+                    .valign(gtk::Align::Center)
+                    .hexpand(true)
+                    .ellipsize(gtk::pango::EllipsizeMode::End)
+                    .build(),
+            );
+            row_box.append(
+                &gtk::Image::builder()
+                    .icon_name("go-next-symbolic")
+                    .css_classes(["dim-label"])
+                    .valign(gtk::Align::Center)
+                    .build(),
+            );
+            if let Some(air_date) = &season.air_date {
+                row_box.append(
+                    &gtk::Label::builder()
+                        .label(air_date)
+                        .css_classes(["caption", "dim-label"])
+                        .valign(gtk::Align::Center)
+                        .build(),
+                );
+            }
+            row.set_child(Some(&row_box));
+
+            let episodes = info
+                .episodes
+                .get(&season.number)
+                .cloned()
+                .unwrap_or_default();
+            let season_title = format!("Season {}", season.number);
+            let win = self.downgrade();
+            row.connect_activated(move |_| {
+                if let Some(win) = win.upgrade() {
+                    win.show_episodes(&season_title, &episodes);
+                }
+            });
+            list.append(&row);
+        }
+        seasons_box.append(&list);
+    }
+
+    /// Push the episodes page for one season and fill its list.
+    fn show_episodes(&self, season_title: &str, episodes: &[Episode]) {
+        let imp = self.imp();
+        imp.episodes_page.set_title(season_title);
+        while let Some(child) = imp.episodes_list.first_child() {
+            imp.episodes_list.remove(&child);
+        }
+
+        if episodes.is_empty() {
+            // A season listed in seasons[] may have no episode entries.
+            let row = gtk::ListBoxRow::builder()
+                .activatable(false)
+                .selectable(false)
+                .build();
+            row.set_child(Some(&dim_label("No episodes available for this season.")));
+            imp.episodes_list.append(&row);
+        }
+        for episode in episodes {
+            let row = adw::ActionRow::new();
+            let row_box = gtk::Box::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .spacing(3)
+                .margin_top(8)
+                .margin_bottom(8)
+                .margin_start(12)
+                .margin_end(12)
+                .build();
+            row_box.append(
+                &gtk::Label::builder()
+                    .label(format!("E{} — {}", episode.number, episode.title))
+                    .halign(gtk::Align::Start)
+                    .ellipsize(gtk::pango::EllipsizeMode::End)
+                    .build(),
+            );
+            let mut subtitle = episode.duration.clone();
+            if let Some(container) = &episode.container {
+                subtitle = Some(match subtitle {
+                    Some(duration) => format!("{duration} · {container}"),
+                    None => container.clone(),
+                });
+            }
+            if let Some(subtitle) = subtitle {
+                row_box.append(
+                    &gtk::Label::builder()
+                        .label(subtitle)
+                        .halign(gtk::Align::Start)
+                        .ellipsize(gtk::pango::EllipsizeMode::End)
+                        .css_classes(["caption", "dim-label"])
+                        .build(),
+                );
+            }
+            row.set_child(Some(&row_box));
+
+            let win = self.downgrade();
+            let episode_title = episode.title.clone();
+            row.connect_activated(move |_| {
+                if let Some(win) = win.upgrade() {
+                    win.play(&episode_title);
+                }
+            });
+            imp.episodes_list.append(&row);
+        }
+        imp.main_view.push(&*imp.episodes_page);
+    }
+
+    /// Movie body: offline name/rating/cover immediately, plot & co. from
+    /// the async get_vod_info fetch, plus a prominent Play button.
+    fn open_vod_details(
+        &self,
+        id: i64,
+        name: &str,
+        rating: Option<String>,
+        cover: Option<&str>,
+        generation: u64,
+    ) {
+        let imp = self.imp();
+
+        imp.detail_content.append(&detail_header(
+            name,
+            cover,
+            &[None, rating.clone(), None],
+            None,
+            None,
+            None,
+        ));
+
+        // Details area: spinner while the fetch runs, replaced by the
+        // meta/plot block on success or a graceful note on failure.
+        let details_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .build();
+        details_box.append(
+            &gtk::Spinner::builder()
+                .spinning(true)
+                .halign(gtk::Align::Center)
+                .valign(gtk::Align::Center)
+                .margin_top(12)
+                .margin_bottom(12)
+                .build(),
+        );
+        imp.detail_content.append(&details_box);
+
+        let play = gtk::Button::builder()
+            .label("Play")
+            .halign(gtk::Align::Center)
+            .css_classes(["suggested-action", "pill"])
+            .build();
+        let win = self.downgrade();
+        let title = name.to_string();
+        play.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                win.play(&title);
+            }
+        });
+        imp.detail_content.append(&play);
+
+        let win = self.downgrade();
+        let details_box = details_box.clone();
+        details::vod_info(id, move |result| {
+            let Some(win) = win.upgrade() else {
+                return;
+            };
+            let i = win.imp();
+            if i.details_generation.get() != generation {
+                return;
+            }
+            win.fill_vod_details(&details_box, result, rating);
+        });
+    }
+
+    /// Replace the movie-details spinner with the fetched metadata (or a
+    /// graceful failure note; name/rating/cover are already on the page).
+    fn fill_vod_details(
+        &self,
+        details_box: &gtk::Box,
+        result: Option<details::VodInfo>,
+        rating: Option<String>,
+    ) {
+        while let Some(child) = details_box.first_child() {
+            details_box.remove(&child);
+        }
+        let Some(info) = result else {
+            self.toast("Could not load movie details");
+            details_box.append(&dim_label(
+                "Movie details are unavailable right now. Play still works.",
+            ));
+            return;
+        };
+
+        if let Some(meta) = meta_line(&[info.genre, rating, info.release_date]) {
+            details_box.append(&dim_label(&meta));
+        }
+        if let Some(plot) = &info.plot {
+            details_box.append(&plot_label(plot));
+        }
+        if let Some(cast) = &info.cast {
+            details_box.append(&dim_label(&format!("Cast: {cast}")));
+        }
+        if let Some(director) = &info.director {
+            details_box.append(&dim_label(&format!("Director: {director}")));
+        }
+        if let Some(duration) = &info.duration {
+            details_box.append(&dim_label(&format!("Duration: {duration}")));
+        }
     }
 
     fn toggle_playing(&self) {
@@ -917,13 +1298,158 @@ impl Window {
     }
 }
 
+/// Detail-page header: cover art on the left, title + "genre · rating ·
+/// date" meta line (+ optional cast, director and run-time lines) on the
+/// right.
+#[allow(clippy::too_many_arguments)]
+fn detail_header(
+    title: &str,
+    cover: Option<&str>,
+    meta: &[Option<String>],
+    cast: Option<&str>,
+    director: Option<&str>,
+    run_time: Option<&str>,
+) -> gtk::Box {
+    let box_ = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(18)
+        .build();
+    box_.append(&cover_art(cover, 130, 195));
+
+    let info = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .valign(gtk::Align::Start)
+        .hexpand(true)
+        .build();
+    info.append(
+        &gtk::Label::builder()
+            .label(title)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .xalign(0.0)
+            .halign(gtk::Align::Start)
+            .css_classes(["title-2"])
+            .build(),
+    );
+    if let Some(meta) = meta_line(meta) {
+        info.append(&dim_label(&meta));
+    }
+    if let Some(cast) = cast {
+        info.append(&dim_label(&format!("Cast: {cast}")));
+    }
+    if let Some(director) = director {
+        info.append(&dim_label(&format!("Director: {director}")));
+    }
+    if let Some(run_time) = run_time {
+        info.append(&dim_label(&format!("~{run_time} min per episode")));
+    }
+    box_.append(&info);
+    box_
+}
+
+/// Cover art box with placeholder + async picture fill (same mechanics as
+/// the content cards). Falls back to the placeholder on any failure.
+fn cover_art(url: Option<&str>, width: i32, height: i32) -> gtk::Overlay {
+    let art = gtk::Box::builder()
+        .css_classes(["card"])
+        .width_request(width)
+        .height_request(height)
+        .valign(gtk::Align::Start)
+        .build();
+    let placeholder = gtk::Image::builder()
+        .icon_name("video-display-symbolic")
+        .pixel_size(40)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .build();
+    let picture = gtk::Picture::builder()
+        .content_fit(gtk::ContentFit::Cover)
+        .width_request(width)
+        .height_request(height)
+        .visible(false)
+        .build();
+
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&art));
+    overlay.add_overlay(&placeholder);
+    overlay.add_overlay(&picture);
+
+    if let Some(url) = url {
+        crate::covers::fetch(url.to_string(), move |path| {
+            if let Some(path) = path {
+                if let Ok(texture) = gtk::gdk::Texture::from_filename(&path) {
+                    picture.set_paintable(Some(&texture));
+                    picture.set_visible(true);
+                    placeholder.set_visible(false);
+                }
+            }
+        });
+    }
+    overlay
+}
+
+fn plot_label(text: &str) -> gtk::Label {
+    gtk::Label::builder()
+        .label(text)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .xalign(0.0)
+        .halign(gtk::Align::Start)
+        .build()
+}
+
+fn dim_label(text: &str) -> gtk::Label {
+    gtk::Label::builder()
+        .label(text)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .xalign(0.0)
+        .halign(gtk::Align::Start)
+        .css_classes(["dim-label"])
+        .build()
+}
+
+/// "genre · rating · date" from whichever parts are present.
+fn meta_line(parts: &[Option<String>]) -> Option<String> {
+    let joined: Vec<&str> = parts.iter().flatten().map(String::as_str).collect();
+    (!joined.is_empty()).then(|| joined.join(" · "))
+}
+
 fn content_card(
     item: &Item,
     favs: &[String],
     category_label: Option<&str>,
     win: glib::WeakRef<Window>,
 ) -> gtk::FlowBoxChild {
-    let is_fav = favs.iter().any(|n| n == &item.name);
+    card_body(
+        &item.name,
+        item.icon.as_deref(),
+        Some(item.kind),
+        Some(item.id),
+        favs,
+        category_label,
+        win,
+    )
+}
+
+/// Fallback card for a favorited name that no longer matches a catalog
+/// item: placeholder art, no cover, no kind action.
+fn name_card(name: &str, favs: &[String], win: glib::WeakRef<Window>) -> gtk::FlowBoxChild {
+    card_body(name, None, None, None, favs, None, win)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn card_body(
+    name: &str,
+    icon: Option<&str>,
+    kind: Option<Kind>,
+    item_id: Option<i64>,
+    favs: &[String],
+    category_label: Option<&str>,
+    win: glib::WeakRef<Window>,
+) -> gtk::FlowBoxChild {
+    let is_fav = favs.iter().any(|n| n == name);
 
     let art = gtk::Box::builder()
         .css_classes(["card"])
@@ -940,28 +1466,75 @@ fn content_card(
         .content_fit(gtk::ContentFit::Cover)
         .visible(false)
         .build();
+
+    // Hover scrim over the art area: dark backdrop giving the action
+    // buttons contrast; it fades in via CSS :hover. The heart keeps the
+    // .heart-btn styling (the scrim replaces the old .card-heart chip).
     let heart = gtk::Button::builder()
         .icon_name("rtv-heart-symbolic")
         .tooltip_text("Toggle favorite")
-        .css_classes(["flat", "heart-btn", "card-heart"])
-        .halign(gtk::Align::End)
-        .valign(gtk::Align::Start)
-        .margin_top(2)
-        .margin_end(2)
+        .css_classes(["flat", "heart-btn"])
         .build();
     set_heart_active(&heart, is_fav);
+    let actions = gtk::Box::builder()
+        .spacing(8)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .build();
+    actions.append(&heart);
+    if let Some(kind) = kind {
+        let action = match kind {
+            Kind::Live => gtk::Button::builder()
+                .icon_name("media-playback-start-symbolic")
+                .tooltip_text("Play")
+                .css_classes(["flat"])
+                .build(),
+            Kind::Series | Kind::Vod => gtk::Button::builder()
+                .icon_name("view-more-symbolic")
+                .tooltip_text("Details")
+                .css_classes(["flat"])
+                .build(),
+        };
+        let win = win.clone();
+        let card_name = name.to_string();
+        match kind {
+            Kind::Live => {
+                action.connect_clicked(move |_| {
+                    if let Some(win) = win.upgrade() {
+                        win.play(&card_name);
+                    }
+                });
+            }
+            Kind::Series | Kind::Vod => {
+                // Details push the content detail page (series seasons or
+                // movie info); the id resolves the item in the catalog.
+                if let Some(id) = item_id {
+                    let win = win.clone();
+                    action.connect_clicked(move |_| {
+                        if let Some(win) = win.upgrade() {
+                            win.open_details(kind, id, &card_name);
+                        }
+                    });
+                }
+            }
+        }
+        actions.append(&action);
+    }
+    let scrim = gtk::Box::builder().css_classes(["card-scrim"]).build();
+    scrim.append(&actions);
+
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&art));
     overlay.add_overlay(&placeholder);
     overlay.add_overlay(&picture);
-    overlay.add_overlay(&heart);
+    overlay.add_overlay(&scrim);
 
     // Cover artwork: fetch-on-demand with a persistent disk cache; the
     // placeholder stays until the fetch succeeds and on any failure.
-    if let Some(url) = &item.icon {
+    if let Some(url) = icon {
         let picture = picture.clone();
         let placeholder = placeholder.clone();
-        crate::covers::fetch(url.clone(), move |path| {
+        crate::covers::fetch(url.to_string(), move |path| {
             if let Some(path) = path {
                 if let Ok(texture) = gtk::gdk::Texture::from_filename(&path) {
                     picture.set_paintable(Some(&texture));
@@ -973,7 +1546,7 @@ fn content_card(
     }
 
     let label = gtk::Label::builder()
-        .label(&item.name)
+        .label(name)
         .wrap(true)
         .justify(gtk::Justification::Center)
         .halign(gtk::Align::Center)
@@ -998,7 +1571,7 @@ fn content_card(
         );
     }
 
-    let card_name = item.name.clone();
+    let card_name = name.to_string();
     heart.connect_clicked(move |button| {
         if let Some(win) = win.upgrade() {
             let is_fav = win.toggle_fav(&card_name);
@@ -1018,11 +1591,6 @@ fn first_label(container: &gtk::Box) -> Option<String> {
         child = widget.next_sibling();
     }
     None
-}
-
-fn row_label(row: &gtk::ListBoxRow) -> Option<String> {
-    let container = row.child().and_downcast::<gtk::Box>()?;
-    first_label(&container)
 }
 
 fn set_heart_active(button: &gtk::Button, active: bool) {
