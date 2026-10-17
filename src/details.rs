@@ -7,7 +7,7 @@
 //! (gitignored): the values are NEVER logged, printed or persisted — only
 //! placed into the request URL in memory.
 
-use std::{cell::RefCell, collections::HashMap, sync::OnceLock};
+use std::{cell::RefCell, collections::HashMap, fs, sync::OnceLock};
 
 use gtk::glib;
 use serde::Deserialize;
@@ -127,6 +127,13 @@ pub fn series_info(series_id: i64, done: impl FnOnce(Option<SeriesInfo>) + 'stat
         done(Some(cached));
         return;
     }
+    if let Some(value) = local_dump("series_info", series_id) {
+        if let Some(info) = parse_series_info(&value) {
+            SERIES_CACHE.with(|c| c.borrow_mut().insert(series_id, info.clone()));
+            done(Some(info));
+            return;
+        }
+    }
     let Some(url) = api_url(&format!("action=get_series_info&series_id={series_id}")) else {
         done(None);
         return;
@@ -147,6 +154,13 @@ pub fn vod_info(vod_id: i64, done: impl FnOnce(Option<VodInfo>) + 'static) {
         done(Some(cached));
         return;
     }
+    if let Some(value) = local_dump("vod_info", vod_id) {
+        if let Some(info) = parse_vod_info(&value) {
+            VOD_CACHE.with(|c| c.borrow_mut().insert(vod_id, info.clone()));
+            done(Some(info));
+            return;
+        }
+    }
     let Some(url) = api_url(&format!("action=get_vod_info&vod_id={vod_id}")) else {
         done(None);
         return;
@@ -164,6 +178,18 @@ pub fn vod_info(vod_id: i64, done: impl FnOnce(Option<VodInfo>) + 'static) {
 /// live inside the returned String, in memory.
 fn api_url(query: &str) -> Option<String> {
     server().map(|server| format!("{}&{}", server.base_url, query))
+}
+
+/// Offline-first: local dumps (`samples/series_info/series_info_<id>.json`,
+/// `samples/vod_info/vod_info_<id>.json`) win over the network. Unparsable
+/// dumps (e.g. a stale auth-failure body) fall through to the network.
+fn local_dump(kind: &str, id: i64) -> Option<Value> {
+    let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR")))
+        .join("samples")
+        .join(kind)
+        .join(format!("{kind}_{id}.json"));
+    let text = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 /// GET a JSON document; `done` receives the parsed value or `None` on any
