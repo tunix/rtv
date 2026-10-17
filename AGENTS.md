@@ -12,7 +12,7 @@ IPTV player for the GNOME desktop. Rust + GTK4/libadwaita, Xtream Codes first, M
 
 - `cargo build` / `cargo test` / `cargo fmt` / `cargo clippy --all-targets` — clippy and fmt must be clean before committing.
 - GUI: `cargo run`
-- Commits: small and meaningful, conventional style (`feat:`, `chore:`). Never push unless explicitly asked.
+- Commits: small and meaningful, conventional style (`feat:`, `chore:`). **Never push to `main` and never commit directly to `main` unless Alper explicitly asks.** All changes go through PRs: create a branch, commit there, push the branch, open a PR (gh CLI available). Multiple logical chunks may be split into multiple PRs.
 
 ## Product rules
 
