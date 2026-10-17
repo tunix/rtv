@@ -6,3 +6,5 @@
 /.venv-flatpak
 __pycache__/
 /samples
+
+/info:
