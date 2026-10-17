@@ -10,12 +10,10 @@ const SEARCH_CAP: usize = 500;
 /// Cards appended to a grid per idle tick (progressive rendering).
 const FILL_CHUNK: usize = 40;
 
-/// Sidebar section header row: chevron + label, click toggles collapse.
+/// Sidebar section header row: icon + label, click toggles collapse.
 #[derive(Debug)]
 pub struct HeaderRow {
     row: gtk::ListBoxRow,
-    chevron: gtk::Image,
-    group: i32,
 }
 
 /// Sidebar category row: activating it shows the category's content grid.
@@ -65,6 +63,8 @@ mod imp {
         pub favorites_title: TemplateChild<gtk::Label>,
         #[template_child]
         pub favorites_list: TemplateChild<gtk::ListBox>,
+        #[template_child]
+        pub clear_favorites: TemplateChild<gtk::Button>,
         #[template_child]
         pub content_list: TemplateChild<gtk::ListBox>,
         #[template_child]
@@ -290,7 +290,7 @@ impl Window {
                 dialog.set_application_icon("io.github.tunix.rtv");
                 dialog.set_version(env!("CARGO_PKG_VERSION"));
                 dialog.set_website("https://github.com/tunix/rtv");
-                dialog.set_developer_name("Tunix");
+                dialog.set_developer_name("Alper Kanat");
                 dialog.set_comments("IPTV player for the GNOME desktop");
                 dialog.set_license_type(gtk::License::Gpl30Only);
                 dialog.present(Some(&win));
@@ -336,6 +336,32 @@ impl Window {
             if let Some(win) = win.upgrade() {
                 if let Some(name) = row_label(row) {
                     win.play(&name);
+                }
+            }
+        });
+
+        // "Clear all" empties the favorites at once and refreshes whatever
+        // grid is showing so the card hearts fall back to inactive.
+        let win = self.downgrade();
+        imp.clear_favorites.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                let i = win.imp();
+                if i.favorites.borrow().is_empty() {
+                    return;
+                }
+                i.favorites.borrow_mut().clear();
+                if i.current.borrow().is_some() {
+                    set_heart_active(&i.player_heart, false);
+                }
+                win.rebuild_favorites();
+                let selected = i.selected_category.get();
+                if selected >= 0 {
+                    win.select_category(selected as usize);
+                } else {
+                    let query = i.query.borrow().clone();
+                    if !query.trim().is_empty() {
+                        win.apply_search(&query);
+                    }
                 }
             }
         });
@@ -506,12 +532,6 @@ impl Window {
                 .selectable(false)
                 .build();
             let header_box = gtk::Box::builder().spacing(6).build();
-            let chevron = gtk::Image::builder()
-                .icon_name("chevron-down-symbolic")
-                .pixel_size(14)
-                .valign(gtk::Align::Center)
-                .build();
-            header_box.append(&chevron);
             header_box.append(
                 &gtk::Image::builder()
                     .icon_name(kind.icon())
@@ -523,7 +543,7 @@ impl Window {
                 &gtk::Label::builder()
                     .label(format!("{} · {}", kind.title(), cats.len()))
                     .xalign(0.0)
-                    .css_classes(["caption", "dim-label"])
+                    .css_classes(["heading"])
                     .build(),
             );
             header.set_child(Some(&header_box));
@@ -536,11 +556,7 @@ impl Window {
             });
             header.add_controller(gesture);
             imp.content_list.append(&header);
-            imp.headers.borrow_mut().push(HeaderRow {
-                row: header,
-                chevron,
-                group,
-            });
+            imp.headers.borrow_mut().push(HeaderRow { row: header });
 
             for (cat_index, cat) in cats {
                 let count = catalog
@@ -576,16 +592,6 @@ impl Window {
                 collapsed.push(false);
             }
             collapsed[group as usize] = !collapsed[group as usize];
-        }
-        let open = !self.collapsed(group);
-        for h in imp.headers.borrow().iter() {
-            if h.group == group {
-                h.chevron.set_icon_name(Some(if open {
-                    "chevron-down-symbolic"
-                } else {
-                    "chevron-right-symbolic"
-                }));
-            }
         }
         self.refresh_rows_visibility();
     }
@@ -774,17 +780,16 @@ impl Window {
         is_fav
     }
 
-    /// Rebuild the pinned Favorites section from the in-memory list; the
-    /// section stays hidden while empty (favorites sit above categories or
-    /// don't show at all).
+    /// Rebuild the pinned Favorites section from the in-memory list. The
+    /// section is always visible (title + list, even when empty); the
+    /// "Clear all" button stays insensitive while there is nothing to clear.
     fn rebuild_favorites(&self) {
         let imp = self.imp();
         while let Some(child) = imp.favorites_list.first_child() {
             imp.favorites_list.remove(&child);
         }
         let empty = imp.favorites.borrow().is_empty();
-        imp.favorites_title.set_visible(!empty);
-        imp.favorites_list.set_visible(!empty);
+        imp.clear_favorites.set_sensitive(!empty);
 
         for name in imp.favorites.borrow().iter() {
             let row = gtk::ListBoxRow::new();
@@ -923,7 +928,7 @@ fn content_card(
     let art = gtk::Box::builder()
         .css_classes(["card"])
         .width_request(150)
-        .height_request(90)
+        .height_request(150)
         .build();
     let placeholder = gtk::Image::builder()
         .icon_name("video-display-symbolic")
@@ -938,7 +943,7 @@ fn content_card(
     let heart = gtk::Button::builder()
         .icon_name("rtv-heart-symbolic")
         .tooltip_text("Toggle favorite")
-        .css_classes(["flat", "heart-btn"])
+        .css_classes(["flat", "heart-btn", "card-heart"])
         .halign(gtk::Align::End)
         .valign(gtk::Align::Start)
         .margin_top(2)
