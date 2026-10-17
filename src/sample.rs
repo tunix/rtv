@@ -16,7 +16,7 @@ impl Kind {
 
     pub fn title(self) -> &'static str {
         match self {
-            Kind::Live => "Live",
+            Kind::Live => "Live TV",
             Kind::Series => "Series",
             Kind::Vod => "Movies",
         }

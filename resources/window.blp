@@ -82,13 +82,20 @@ template $RtvWindow : Adw.ApplicationWindow {
                   xalign: 0;
                   margin-start: 10;
                   margin-top: 8;
-                  visible: false;
                   styles ["caption", "dim-label"]
                 }
 
                 Gtk.ListBox favorites_list {
                   styles ["navigation-sidebar"]
-                  visible: false;
+                }
+
+                Gtk.Button clear_favorites {
+                  label: _("Clear all");
+                  halign: start;
+                  margin-start: 10;
+                  margin-top: 4;
+                  tooltip-text: _("Remove all favorites");
+                  styles ["flat", "dim-label"]
                 }
 
                 Gtk.ScrolledWindow {
