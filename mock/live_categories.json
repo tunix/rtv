@@ -1,0 +1,26 @@
+[
+  {
+    "category_id": "1",
+    "category_name": "Sports"
+  },
+  {
+    "category_id": "2",
+    "category_name": "News"
+  },
+  {
+    "category_id": "3",
+    "category_name": "Movies HD"
+  },
+  {
+    "category_id": "4",
+    "category_name": "Documentary"
+  },
+  {
+    "category_id": "5",
+    "category_name": "Kids"
+  },
+  {
+    "category_id": "6",
+    "category_name": "Music"
+  }
+]
