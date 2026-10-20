@@ -186,6 +186,14 @@ impl Window {
             collapsed.clear();
             collapsed.extend(Kind::ALL.iter().enumerate().map(|(i, _)| i != 0));
         }
+        // Template children of the NavigationView (detail/episodes/player
+        // pages) end up on the stack while the builder constructs the widget
+        // tree, so the window would otherwise open on an empty page. Reset
+        // the stack to the welcome page before anything is shown.
+        window
+            .imp()
+            .main_view
+            .pop_to_page(&*window.imp().welcome_page);
         window
     }
 
