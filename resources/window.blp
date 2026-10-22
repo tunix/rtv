@@ -347,10 +347,9 @@ template $RtvWindow : Adw.ApplicationWindow {
           };
         };
       }
-    };
 
     /* Content details: series or movie body built from Rust. */
-    Adw.NavigationPage detail_page {
+      Adw.NavigationPage detail_page {
       title: _("Details");
       can-pop: true;
 
@@ -376,10 +375,10 @@ template $RtvWindow : Adw.ApplicationWindow {
           };
         };
       };
-    }
+      }
 
-    /* Episodes of one season, pushed on top of the series details. */
-    Adw.NavigationPage episodes_page {
+      /* Episodes of one season, pushed on top of the series details. */
+      Adw.NavigationPage episodes_page {
       title: _("Season");
       can-pop: true;
 
@@ -405,7 +404,8 @@ template $RtvWindow : Adw.ApplicationWindow {
           };
         };
       };
-    }
+      }
+    };
   };
 }
 

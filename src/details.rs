@@ -1,10 +1,13 @@
-//! On-demand content details (mock phase): Xtream `get_series_info` and
-//! `get_vod_info` calls against the sample panel, mirroring `covers.rs`:
-//! libsoup3 on the GLib main loop, results delivered through a callback,
-//! in-memory caching, graceful failure — never blocking, never crashing.
+//! On-demand content details: Xtream `get_series_info` and `get_vod_info`
+//! calls against the panel, mirroring `covers.rs`: libsoup3 on the GLib
+//! main loop, results delivered through a callback, in-memory caching,
+//! graceful failure — never blocking, never crashing.
 //!
-//! Requests and credentials both come from `samples/user_info.json`
-//! (gitignored): the values are NEVER logged, printed or persisted — only
+//! In `--mock` mode the committed `mock/series_info/` + `mock/vod_info/`
+//! datasets serve every request offline; no network request is made and
+//! `samples/user_info.json` is never touched. In real mode requests and
+//! credentials both come from `samples/user_info.json` (gitignored, still
+//! optional): the values are NEVER logged, printed or persisted — only
 //! placed into the request URL in memory.
 
 use std::{cell::RefCell, collections::HashMap, fs, sync::OnceLock};
@@ -35,6 +38,10 @@ fn server() -> Option<&'static Server> {
     static SERVER: OnceLock<Option<Server>> = OnceLock::new();
     SERVER
         .get_or_init(|| {
+            // Mock mode never touches credentials or the network.
+            if crate::mock::enabled() {
+                return None;
+            }
             #[derive(Deserialize)]
             struct UserFile {
                 user_info: UserCreds,
@@ -98,6 +105,8 @@ pub struct Episode {
     pub title: String,
     pub container: Option<String>,
     pub duration: Option<String>,
+    /// Short summary from `info.plot`, shown on the episode rows.
+    pub plot: Option<String>,
 }
 
 /// Parsed `get_series_info` response. A season listed in `seasons[]` may
@@ -122,56 +131,68 @@ pub struct VodInfo {
 
 /// Fetch series info (seasons + episodes) asynchronously; `done` runs on
 /// the main loop with `None` on any failure. Results are cached in memory.
+/// Mock mode serves everything from the committed dataset, real mode goes
+/// to the panel API.
 pub fn series_info(series_id: i64, done: impl FnOnce(Option<SeriesInfo>) + 'static) {
     if let Some(cached) = SERIES_CACHE.with(|c| c.borrow().get(&series_id).cloned()) {
         done(Some(cached));
         return;
     }
-    if let Some(value) = local_dump("series_info", series_id) {
-        if let Some(info) = parse_series_info(&value) {
-            SERIES_CACHE.with(|c| c.borrow_mut().insert(series_id, info.clone()));
-            done(Some(info));
+    let mut parsed = local_dump("series_info", series_id)
+        .as_ref()
+        .and_then(parse_series_info);
+    if parsed.is_none() && !crate::mock::enabled() {
+        let url = api_url(&format!("action=get_series_info&series_id={series_id}"));
+        if let Some(url) = url {
+            get_json(&url, move |value| {
+                let result = value.as_ref().and_then(parse_series_info);
+                if let Some(info) = &result {
+                    SERIES_CACHE.with(|c| c.borrow_mut().insert(series_id, info.clone()));
+                }
+                done(result);
+            });
             return;
         }
     }
-    let Some(url) = api_url(&format!("action=get_series_info&series_id={series_id}")) else {
+    if let Some(info) = parsed.take() {
+        SERIES_CACHE.with(|c| c.borrow_mut().insert(series_id, info.clone()));
+        done(Some(info));
+    } else {
         done(None);
-        return;
-    };
-    get_json(&url, move |value| {
-        let parsed = value.as_ref().and_then(parse_series_info);
-        if let Some(info) = &parsed {
-            SERIES_CACHE.with(|c| c.borrow_mut().insert(series_id, info.clone()));
-        }
-        done(parsed);
-    });
+    }
 }
 
 /// Fetch VOD info (plot/genre/cast/...) asynchronously; `done` runs on the
 /// main loop with `None` on any failure. Results are cached in memory.
+/// Mock mode serves everything from the committed dataset, real mode goes
+/// to the panel API.
 pub fn vod_info(vod_id: i64, done: impl FnOnce(Option<VodInfo>) + 'static) {
     if let Some(cached) = VOD_CACHE.with(|c| c.borrow().get(&vod_id).cloned()) {
         done(Some(cached));
         return;
     }
-    if let Some(value) = local_dump("vod_info", vod_id) {
-        if let Some(info) = parse_vod_info(&value) {
-            VOD_CACHE.with(|c| c.borrow_mut().insert(vod_id, info.clone()));
-            done(Some(info));
+    let mut parsed = local_dump("vod_info", vod_id)
+        .as_ref()
+        .and_then(parse_vod_info);
+    if parsed.is_none() && !crate::mock::enabled() {
+        let url = api_url(&format!("action=get_vod_info&vod_id={vod_id}"));
+        if let Some(url) = url {
+            get_json(&url, move |value| {
+                let result = value.as_ref().and_then(parse_vod_info);
+                if let Some(info) = &result {
+                    VOD_CACHE.with(|c| c.borrow_mut().insert(vod_id, info.clone()));
+                }
+                done(result);
+            });
             return;
         }
     }
-    let Some(url) = api_url(&format!("action=get_vod_info&vod_id={vod_id}")) else {
+    if let Some(info) = parsed.take() {
+        VOD_CACHE.with(|c| c.borrow_mut().insert(vod_id, info.clone()));
+        done(Some(info));
+    } else {
         done(None);
-        return;
-    };
-    get_json(&url, move |value| {
-        let parsed = value.as_ref().and_then(parse_vod_info);
-        if let Some(info) = &parsed {
-            VOD_CACHE.with(|c| c.borrow_mut().insert(vod_id, info.clone()));
-        }
-        done(parsed);
-    });
+    }
 }
 
 /// Compose the player_api.php URL for one action. Credentials only ever
@@ -180,12 +201,14 @@ fn api_url(query: &str) -> Option<String> {
     server().map(|server| format!("{}&{}", server.base_url, query))
 }
 
-/// Offline-first: local dumps (`samples/series_info/series_info_<id>.json`,
-/// `samples/vod_info/vod_info_<id>.json`) win over the network. Unparsable
-/// dumps (e.g. a stale auth-failure body) fall through to the network.
+/// Offline dumps win over the network when they parse. In `--mock` mode the
+/// `mock/series_info/` + `mock/vod_info/` datasets are complete and fully
+/// replace the network; in real mode the gitignored
+/// `samples/<kind>/<kind>_<id>.json` dumps are an optional convenience.
+/// Unparsable dumps (e.g. a stale auth-failure body) fall through.
 fn local_dump(kind: &str, id: i64) -> Option<Value> {
     let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR")))
-        .join("samples")
+        .join(crate::mock::data_dir())
         .join(kind)
         .join(format!("{kind}_{id}.json"));
     let text = fs::read_to_string(path).ok()?;
@@ -277,6 +300,7 @@ fn parse_series_info(value: &Value) -> Option<SeriesInfo> {
                                     .unwrap_or_else(|| format!("Episode {number}")),
                                 container: str_field(e, "container_extension"),
                                 duration: e.get("info").and_then(|i| str_field(i, "duration")),
+                                plot: e.get("info").and_then(|i| str_field(i, "plot")),
                             }
                         })
                         .collect()
