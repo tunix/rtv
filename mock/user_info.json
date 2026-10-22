@@ -1,0 +1,12 @@
+{
+  "user_info": {
+    "username": "mock",
+    "password": "mock",
+    "status": "Active"
+  },
+  "server_info": {
+    "url": "mock.invalid",
+    "port": 80,
+    "server_protocol": "http"
+  }
+}

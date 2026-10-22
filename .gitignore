@@ -5,6 +5,8 @@
 /.flatpak-builder
 /.venv-flatpak
 __pycache__/
+# Credential-free real dumps from the user's panel (never commit these);
+# the committed mock/ dataset lives in mock/ and is NOT ignored.
 /samples
 
 /info:

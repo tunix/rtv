@@ -186,6 +186,14 @@ impl Window {
             collapsed.clear();
             collapsed.extend(Kind::ALL.iter().enumerate().map(|(i, _)| i != 0));
         }
+        // Template children of the NavigationView (detail/episodes/player
+        // pages) end up on the stack while the builder constructs the widget
+        // tree, so the window would otherwise open on an empty page. Reset
+        // the stack to the welcome page before anything is shown.
+        window
+            .imp()
+            .main_view
+            .pop_to_page(&*window.imp().welcome_page);
         window
     }
 
@@ -202,19 +210,27 @@ impl Window {
     }
 
     fn setup_actions(&self) {
-        // First run: adding a (mock) source unlocks browsing. Later this
-        // opens the real source-setup dialog.
+        // First run: adding a source unlocks browsing. In --mock mode the
+        // mock catalog is attached at once; in real mode the source-setup
+        // dialog (backend work) has not landed yet, so the user stays on
+        // the welcome screen with an explanatory toast.
         let win = self.downgrade();
         let add_source = gio::SimpleAction::new("add-source", None);
         add_source.connect_activate(move |_, _| {
             let Some(win) = win.upgrade() else { return };
             let imp = win.imp();
-            if !imp.has_source.get() {
+            if imp.has_source.get() {
+                win.toast("Source dialog comes later — the mock already has 2 sources");
+                return;
+            }
+            if crate::mock::enabled() {
                 imp.has_source.set(true);
                 imp.main_view.push(&*imp.browse_page);
                 win.toast("Mock source added — the real setup dialog comes later");
             } else {
-                win.toast("Source dialog comes later — the mock already has 2 sources");
+                win.toast(
+                    "Real source setup is not implemented yet — run `rtv --mock` to explore the UI with sample data",
+                );
             }
         });
         self.add_action(&add_source);
@@ -365,15 +381,12 @@ impl Window {
             }
         });
 
-        // Favorites cards -> the player.
+        // Favorites cards route by content kind: Live plays, Series/Movies
+        // open their detail page (name-only fallback cards keep playing).
         let win = self.downgrade();
         imp.favorites_grid.connect_child_activated(move |_, child| {
             if let Some(win) = win.upgrade() {
-                if let Some(b) = child.child().and_downcast::<gtk::Box>() {
-                    if let Some(name) = first_label(&b) {
-                        win.play(&name);
-                    }
-                }
+                win.route_card(child);
             }
         });
 
@@ -403,25 +416,17 @@ impl Window {
             }
         });
 
-        // Grid cards -> the player.
+        // Grid cards route by content kind, exactly like the favorites grid.
         let win = self.downgrade();
         imp.content_grid.connect_child_activated(move |_, child| {
             if let Some(win) = win.upgrade() {
-                if let Some(b) = child.child().and_downcast::<gtk::Box>() {
-                    if let Some(name) = first_label(&b) {
-                        win.play(&name);
-                    }
-                }
+                win.route_card(child);
             }
         });
         let win = self.downgrade();
         imp.search_grid.connect_child_activated(move |_, child| {
             if let Some(win) = win.upgrade() {
-                if let Some(b) = child.child().and_downcast::<gtk::Box>() {
-                    if let Some(name) = first_label(&b) {
-                        win.play(&name);
-                    }
-                }
+                win.route_card(child);
             }
         });
 
@@ -437,13 +442,20 @@ impl Window {
             entry.set_text("");
         });
 
-        // Leaving the player page (back button / pop) resets player state.
+        // When any page pops off the navigation view (player, details or
+        // episodes), clear player/episodes state if they were on screen.
         let win = self.downgrade();
-        imp.main_view.connect_popped(move |_, _| {
-            if let Some(win) = win.upgrade() {
-                let i = win.imp();
+        imp.main_view.connect_popped(move |_, popped_page| {
+            let Some(win) = win.upgrade() else { return };
+            let i = win.imp();
+            if popped_page == &*i.player_page {
                 i.on_player.set(false);
                 win.cancel_hide();
+            }
+            if popped_page == &*i.episodes_page {
+                while let Some(child) = i.episodes_list.first_child() {
+                    i.episodes_list.remove(&child);
+                }
             }
         });
 
@@ -849,6 +861,31 @@ impl Window {
         }
     }
 
+    /// Card activation routes by the content kind the card carries:
+    /// Live -> playback, Series/Movies -> the detail page, unknown
+    /// (name-only favorites) -> playback by name.
+    fn route_card(&self, child: &gtk::FlowBoxChild) {
+        let imp = self.imp();
+        if let (Some(kind), Some(id)) = (card_kind(child), card_id(child)) {
+            if let Some(item) = imp
+                .catalog
+                .get()
+                .and_then(|c| c.items.iter().find(|it| it.kind == kind && it.id == id))
+            {
+                match kind {
+                    Kind::Live => self.play(&item.name),
+                    Kind::Series | Kind::Vod => self.open_details(kind, id, &item.name),
+                }
+                return;
+            }
+        }
+        // Fallback: cards without kind data (old-style name cards) play by
+        // their title, which is all the information they carry.
+        if let Some(name) = card_name(child) {
+            self.play(&name);
+        }
+    }
+
     fn play(&self, name: &str) {
         let imp = self.imp();
         *imp.current.borrow_mut() = Some(name.to_string());
@@ -915,7 +952,11 @@ impl Window {
         imp.detail_content.append(&detail_header(
             name,
             cover.or(meta.cover.as_deref()),
-            &[meta.genre, meta.rating, meta.release_date],
+            &[
+                meta.genre.clone(),
+                meta.rating.clone(),
+                meta.release_date.clone(),
+            ],
             meta.cast.as_deref(),
             meta.director.as_deref(),
             meta.episode_run_time.as_deref(),
@@ -923,6 +964,18 @@ impl Window {
 
         if let Some(plot) = &meta.plot {
             imp.detail_content.append(&plot_label(plot));
+        }
+
+        // Fragman varsa tıklanabilir bir satır olarak göster; GTK'nın
+        // gösterdiği URI'yi harici tarayıcıda açar.
+        if let Some(trailer) = &meta.trailer {
+            imp.detail_content.append(
+                &gtk::LinkButton::builder()
+                    .uri(trailer)
+                    .label("Watch trailer")
+                    .halign(gtk::Align::Start)
+                    .build(),
+            );
         }
 
         imp.detail_content.append(
@@ -1097,6 +1150,18 @@ impl Window {
                         .label(subtitle)
                         .halign(gtk::Align::Start)
                         .ellipsize(gtk::pango::EllipsizeMode::End)
+                        .css_classes(["caption", "dim-label"])
+                        .build(),
+                );
+            }
+            if let Some(plot) = &episode.plot {
+                row_box.append(
+                    &gtk::Label::builder()
+                        .label(plot)
+                        .wrap(true)
+                        .wrap_mode(gtk::pango::WrapMode::WordChar)
+                        .xalign(0.0)
+                        .halign(gtk::Align::Start)
                         .css_classes(["caption", "dim-label"])
                         .build(),
                 );
@@ -1579,18 +1644,51 @@ fn card_body(
         }
     });
 
-    gtk::FlowBoxChild::builder().child(&b).build()
+    let child = gtk::FlowBoxChild::builder().child(&b).build();
+    // Activation data: the card's content kind, catalog id and title ride
+    // on the FlowBoxChild so child_activated can route Live -> playback
+    // and Series/Movies -> the detail page without re-parsing labels.
+    if let Some(kind) = kind {
+        unsafe {
+            child.set_data(CARD_KIND_KEY, kind as i32);
+        }
+    }
+    if let Some(id) = item_id {
+        unsafe {
+            child.set_data(CARD_ID_KEY, id);
+        }
+    }
+    unsafe {
+        child.set_data(CARD_NAME_KEY, name.to_string());
+    }
+    child
 }
 
-fn first_label(container: &gtk::Box) -> Option<String> {
-    let mut child = container.first_child();
-    while let Some(widget) = child {
-        if let Some(label) = widget.downcast_ref::<gtk::Label>() {
-            return Some(label.label().to_string());
-        }
-        child = widget.next_sibling();
+/// FlowBoxChild data keys for the card-activation router.
+const CARD_KIND_KEY: &str = "rtv-item-kind";
+const CARD_ID_KEY: &str = "rtv-item-id";
+const CARD_NAME_KEY: &str = "rtv-item-name";
+
+// `NonNull::get` collides with `TreeModelExtManual::get` from the gtk4
+// prelude; all derefs stay inside a single unsafe block.
+fn card_kind(child: &gtk::FlowBoxChild) -> Option<Kind> {
+    let kind =
+        unsafe { glib::object::ObjectExt::data::<i32>(child, CARD_KIND_KEY).map(|v| *v.as_ref()) }?;
+    Some(match kind {
+        1 => Kind::Live,
+        2 => Kind::Series,
+        _ => Kind::Vod,
+    })
+}
+
+fn card_id(child: &gtk::FlowBoxChild) -> Option<i64> {
+    unsafe { glib::object::ObjectExt::data::<i64>(child, CARD_ID_KEY).map(|v| *v.as_ref()) }
+}
+
+fn card_name(child: &gtk::FlowBoxChild) -> Option<String> {
+    unsafe {
+        glib::object::ObjectExt::data::<String>(child, CARD_NAME_KEY).map(|v| v.as_ref().clone())
     }
-    None
 }
 
 fn set_heart_active(button: &gtk::Button, active: bool) {

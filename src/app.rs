@@ -88,7 +88,11 @@ pub fn run() {
     }
     app.add_action(&quit);
 
-    app.run();
+    // GApplication parses argv for its own options and aborts on unknown
+    // flags like --mock (glib "Unknown option", exit 0 before our loop
+    // even mattered). Run with ONLY the program name so the app-level
+    // option parsing sees nothing; --mock was already consumed in main().
+    app.run_with_args(&["rtv"][..]);
 }
 
 fn load_css() {

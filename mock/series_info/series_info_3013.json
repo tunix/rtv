@@ -1,0 +1,144 @@
+{
+  "seasons": [
+    {
+      "air_date": "2021-01-15",
+      "episode_count": 4,
+      "name": "Season 1",
+      "cover": "https://picsum.photos/seed/rtv-s3013-e1/150/225",
+      "season_number": 1
+    },
+    {
+      "air_date": "2022-02-15",
+      "episode_count": 6,
+      "name": "Season 2",
+      "cover": "https://picsum.photos/seed/rtv-s3013-e2/150/225",
+      "season_number": 2
+    }
+  ],
+  "episodes": {
+    "1": [
+      {
+        "id": "ep_3013_1_1",
+        "episode_num": 1,
+        "title": "Episode 1",
+        "container_extension": "mkv",
+        "info": {
+          "duration": "0:51:00",
+          "plot": "S1 E1 \u2014 An astrophysicist hears a signal that answers her in her own voice.",
+          "movie_image": "https://picsum.photos/seed/rtv-s3013-e1-1/160/90"
+        },
+        "season": 1
+      },
+      {
+        "id": "ep_3013_1_2",
+        "episode_num": 2,
+        "title": "Episode 2",
+        "container_extension": "mkv",
+        "info": {
+          "duration": "0:43:00",
+          "plot": "S1 E2 \u2014 A taxi driver's nightly routes weave a map of the city's buried crimes.",
+          "movie_image": "https://picsum.photos/seed/rtv-s3013-e1-2/160/90"
+        },
+        "season": 1
+      },
+      {
+        "id": "ep_3013_1_3",
+        "episode_num": 3,
+        "title": "Episode 3",
+        "container_extension": "mkv",
+        "info": {
+          "duration": "0:39:00",
+          "plot": "S1 E3 \u2014 A taxi driver's nightly routes weave a map of the city's buried crimes.",
+          "movie_image": "https://picsum.photos/seed/rtv-s3013-e1-3/160/90"
+        },
+        "season": 1
+      },
+      {
+        "id": "ep_3013_1_4",
+        "episode_num": 4,
+        "title": "Episode 4",
+        "container_extension": "mkv",
+        "info": {
+          "duration": "0:38:00",
+          "plot": "S1 E4 \u2014 The crew of a salvage ship stumbles on a wreck nobody wants found.",
+          "movie_image": "https://picsum.photos/seed/rtv-s3013-e1-4/160/90"
+        },
+        "season": 1
+      }
+    ],
+    "2": [
+      {
+        "id": "ep_3013_2_1",
+        "episode_num": 1,
+        "title": "Episode 1",
+        "container_extension": "mkv",
+        "info": {
+          "duration": "0:23:00",
+          "plot": "S2 E1 \u2014 A detective returns to her hometown and finds every greeting hides a secret.",
+          "movie_image": "https://picsum.photos/seed/rtv-s3013-e2-1/160/90"
+        },
+        "season": 2
+      },
+      {
+        "id": "ep_3013_2_2",
+        "episode_num": 2,
+        "title": "Episode 2",
+        "container_extension": "mkv",
+        "info": {
+          "duration": "0:44:00",
+          "plot": "S2 E2 \u2014 Two rival chefs share one kitchen and a decade-old feud.",
+          "movie_image": "https://picsum.photos/seed/rtv-s3013-e2-2/160/90"
+        },
+        "season": 2
+      },
+      {
+        "id": "ep_3013_2_3",
+        "episode_num": 3,
+        "title": "Episode 3",
+        "container_extension": "mkv",
+        "info": {
+          "duration": "0:26:00",
+          "plot": "S2 E3 \u2014 A detective returns to her hometown and finds every greeting hides a secret.",
+          "movie_image": "https://picsum.photos/seed/rtv-s3013-e2-3/160/90"
+        },
+        "season": 2
+      },
+      {
+        "id": "ep_3013_2_4",
+        "episode_num": 4,
+        "title": "Episode 4",
+        "container_extension": "mkv",
+        "info": {
+          "duration": "0:23:00",
+          "plot": "S2 E4 \u2014 Two rival chefs share one kitchen and a decade-old feud.",
+          "movie_image": "https://picsum.photos/seed/rtv-s3013-e2-4/160/90"
+        },
+        "season": 2
+      },
+      {
+        "id": "ep_3013_2_5",
+        "episode_num": 5,
+        "title": "Episode 5",
+        "container_extension": "mkv",
+        "info": {
+          "duration": "0:34:00",
+          "plot": "S2 E5 \u2014 A detective returns to her hometown and finds every greeting hides a secret.",
+          "movie_image": "https://picsum.photos/seed/rtv-s3013-e2-5/160/90"
+        },
+        "season": 2
+      },
+      {
+        "id": "ep_3013_2_6",
+        "episode_num": 6,
+        "title": "Episode 6",
+        "container_extension": "mkv",
+        "info": {
+          "duration": "0:31:00",
+          "plot": "S2 E6 \u2014 Two rival chefs share one kitchen and a decade-old feud.",
+          "movie_image": "https://picsum.photos/seed/rtv-s3013-e2-6/160/90"
+        },
+        "season": 2
+      }
+    ]
+  }
+}

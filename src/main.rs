@@ -1,6 +1,7 @@
 mod app;
 mod covers;
 mod details;
+mod mock;
 mod sample;
 mod ui;
 
@@ -8,26 +9,36 @@ use gtk::gio;
 use gtk::gio::prelude::*;
 
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some("--check-icons") {
-        register_resources();
-        gtk::init().expect("gtk init");
+    let args = std::env::args().skip(1);
+    for arg in args {
+        match arg.as_str() {
+            "--check-icons" => {
+                register_resources();
+                gtk::init().expect("gtk init");
 
-        // Mechanism: export to XDG_RUNTIME_DIR + display-theme search path.
-        crate::app::install_runtime_icons();
-        let display_theme =
-            gtk::IconTheme::for_display(&gtk::gdk::Display::default().expect("display"));
-        for name in ["io.github.tunix.rtv", "rtv-heart-symbolic"] {
-            let icon = display_theme.lookup_icon(
-                name,
-                &[],
-                16,
-                1,
-                gtk::TextDirection::Ltr,
-                gtk::IconLookupFlags::FORCE_REGULAR,
-            );
-            println!("{name}: {:?}", icon.file().map(|f| f.uri().to_string()));
+                // Mechanism: export to XDG_RUNTIME_DIR + display-theme search path.
+                crate::app::install_runtime_icons();
+                let display_theme =
+                    gtk::IconTheme::for_display(&gtk::gdk::Display::default().expect("display"));
+                for name in ["io.github.tunix.rtv", "rtv-heart-symbolic"] {
+                    let icon = display_theme.lookup_icon(
+                        name,
+                        &[],
+                        16,
+                        1,
+                        gtk::TextDirection::Ltr,
+                        gtk::IconLookupFlags::FORCE_REGULAR,
+                    );
+                    println!("{name}: {:?}", icon.file().map(|f| f.uri().to_string()));
+                }
+                return;
+            }
+            "--mock" => mock::set_enabled(true),
+            other => {
+                eprintln!("Unknown argument: {other}\nUsage: rtv [--mock] [--check-icons]");
+                std::process::exit(2);
+            }
         }
-        return;
     }
 
     tracing_subscriber::fmt()

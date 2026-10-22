@@ -1,0 +1,233 @@
+[
+  {
+    "stream_id": 1001,
+    "num": 1,
+    "name": "Sports HD",
+    "category_id": "1",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1002,
+    "num": 2,
+    "name": "Sports 2",
+    "category_id": "1",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1003,
+    "num": 3,
+    "name": "Sports Prime",
+    "category_id": "1",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1004,
+    "num": 4,
+    "name": "Arena Sport",
+    "category_id": "1",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1005,
+    "num": 5,
+    "name": "Stadium Live",
+    "category_id": "1",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1006,
+    "num": 6,
+    "name": "Goal TV",
+    "category_id": "1",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1007,
+    "num": 7,
+    "name": "Court Central",
+    "category_id": "1",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1008,
+    "num": 8,
+    "name": "Track & Field",
+    "category_id": "1",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1009,
+    "num": 9,
+    "name": "Fight Night",
+    "category_id": "1",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1010,
+    "num": 10,
+    "name": "Pitch HD",
+    "category_id": "1",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1011,
+    "num": 11,
+    "name": "News 24",
+    "category_id": "2",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1012,
+    "num": 12,
+    "name": "World News",
+    "category_id": "2",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1013,
+    "num": 13,
+    "name": "Business Daily",
+    "category_id": "2",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1014,
+    "num": 14,
+    "name": "Headline One",
+    "category_id": "2",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1015,
+    "num": 15,
+    "name": "Sky Report",
+    "category_id": "2",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1016,
+    "num": 16,
+    "name": "Parliament Live",
+    "category_id": "2",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1017,
+    "num": 17,
+    "name": "Weather Now",
+    "category_id": "2",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1018,
+    "num": 18,
+    "name": "Cinema HD",
+    "category_id": "3",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1019,
+    "num": 19,
+    "name": "Cinema Classics",
+    "category_id": "3",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1020,
+    "num": 20,
+    "name": "Action Pack",
+    "category_id": "3",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1021,
+    "num": 21,
+    "name": "Indie Screen",
+    "category_id": "3",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1022,
+    "num": 22,
+    "name": "Planet Doc",
+    "category_id": "4",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1023,
+    "num": 23,
+    "name": "History Channel",
+    "category_id": "4",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1024,
+    "num": 24,
+    "name": "Deep Blue",
+    "category_id": "4",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1025,
+    "num": 25,
+    "name": "Science Now",
+    "category_id": "4",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1026,
+    "num": 26,
+    "name": "Kids Zone",
+    "category_id": "5",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1027,
+    "num": 27,
+    "name": "Cartoon Club",
+    "category_id": "5",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1028,
+    "num": 28,
+    "name": "Tiny Tots",
+    "category_id": "5",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1029,
+    "num": 29,
+    "name": "Adventure Jr.",
+    "category_id": "5",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1030,
+    "num": 30,
+    "name": "Hit Music",
+    "category_id": "6",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1031,
+    "num": 31,
+    "name": "Jazz Caf\u00e9",
+    "category_id": "6",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1032,
+    "num": 32,
+    "name": "Rock One",
+    "category_id": "6",
+    "stream_icon": ""
+  },
+  {
+    "stream_id": 1033,
+    "num": 33,
+    "name": "Classical Live",
+    "category_id": "6",
+    "stream_icon": ""
+  }
+]

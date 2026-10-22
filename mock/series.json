@@ -1,0 +1,434 @@
+[
+  {
+    "series_id": 3000,
+    "num": 1,
+    "name": "Mock Series #01",
+    "category_id": "2",
+    "cover": "https://picsum.photos/seed/rtv-series-3000/300/450",
+    "plot": "The crew of a salvage ship stumbles on a wreck nobody wants found.",
+    "cast": "Ela Yilmaz, Marcus Chen, Priya Nair",
+    "director": "Carmen Ruiz",
+    "genre": "Thriller",
+    "rating": "6.4",
+    "releaseDate": "2023-02-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer01",
+    "episode_run_time": "50",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3000/640/360"
+    ]
+  },
+  {
+    "series_id": 3001,
+    "num": 2,
+    "name": "Mock Series #02",
+    "category_id": "1",
+    "cover": "https://picsum.photos/seed/rtv-series-3001/300/450",
+    "plot": "The crew of a salvage ship stumbles on a wreck nobody wants found.",
+    "cast": "Marek Nowak, Sofia Rossi, Jin Park",
+    "director": "Aylin Demir",
+    "genre": "Drama",
+    "rating": "6.0",
+    "releaseDate": "2015-09-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer02",
+    "episode_run_time": "50",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3001/640/360"
+    ]
+  },
+  {
+    "series_id": 3002,
+    "num": 3,
+    "name": "Mock Series #03",
+    "category_id": "1",
+    "cover": "https://picsum.photos/seed/rtv-series-3002/300/450",
+    "plot": "A detective returns to her hometown and finds every greeting hides a secret.",
+    "cast": "Tomas Weber, Aisha Bello, Luc Moreau",
+    "director": "Ken Watanabe",
+    "genre": "Thriller",
+    "rating": "7.3",
+    "releaseDate": "2016-01-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer03",
+    "episode_run_time": "32",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3002/640/360"
+    ]
+  },
+  {
+    "series_id": 3003,
+    "num": 4,
+    "name": "Mock Series #04",
+    "category_id": "1",
+    "cover": "https://picsum.photos/seed/rtv-series-3003/300/450",
+    "plot": "A taxi driver's nightly routes weave a map of the city's buried crimes.",
+    "cast": "Hana Sato, Diego Alvarez, Ruth Okonkwo",
+    "director": "Carmen Ruiz",
+    "genre": "Thriller",
+    "rating": "6.4",
+    "releaseDate": "2024-06-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer04",
+    "episode_run_time": "28",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3003/640/360"
+    ]
+  },
+  {
+    "series_id": 3004,
+    "num": 5,
+    "name": "Mock Series #05",
+    "category_id": "2",
+    "cover": "https://picsum.photos/seed/rtv-series-3004/300/450",
+    "plot": "The crew of a salvage ship stumbles on a wreck nobody wants found.",
+    "cast": "Marek Nowak, Sofia Rossi, Jin Park",
+    "director": "Aylin Demir",
+    "genre": "Mystery",
+    "rating": "8.8",
+    "releaseDate": "2021-05-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer05",
+    "episode_run_time": "28",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3004/640/360"
+    ]
+  },
+  {
+    "series_id": 3005,
+    "num": 6,
+    "name": "Mock Series #06",
+    "category_id": "1",
+    "cover": "https://picsum.photos/seed/rtv-series-3005/300/450",
+    "plot": "A retiring locksmith receives keys to doors that were never built.",
+    "cast": "Ela Yilmaz, Marcus Chen, Priya Nair",
+    "director": "Ken Watanabe",
+    "genre": "Drama",
+    "rating": "7.7",
+    "releaseDate": "2025-11-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer06",
+    "episode_run_time": "50",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3005/640/360"
+    ]
+  },
+  {
+    "series_id": 3006,
+    "num": 7,
+    "name": "Mock Series #07",
+    "category_id": "1",
+    "cover": "https://picsum.photos/seed/rtv-series-3006/300/450",
+    "plot": "An astrophysicist hears a signal that answers her in her own voice.",
+    "cast": "Tomas Weber, Aisha Bello, Luc Moreau",
+    "director": "Aylin Demir",
+    "genre": "Drama",
+    "rating": "8.1",
+    "releaseDate": "2024-05-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer07",
+    "episode_run_time": "28",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3006/640/360"
+    ]
+  },
+  {
+    "series_id": 3007,
+    "num": 8,
+    "name": "Mock Series #08",
+    "category_id": "1",
+    "cover": "https://picsum.photos/seed/rtv-series-3007/300/450",
+    "plot": "Two rival chefs share one kitchen and a decade-old feud.",
+    "cast": "Ela Yilmaz, Marcus Chen, Priya Nair",
+    "director": "Ken Watanabe",
+    "genre": "Mystery",
+    "rating": "7.3",
+    "releaseDate": "2025-06-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer08",
+    "episode_run_time": "32",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3007/640/360"
+    ]
+  },
+  {
+    "series_id": 3008,
+    "num": 9,
+    "name": "Mock Series #09",
+    "category_id": "2",
+    "cover": "https://picsum.photos/seed/rtv-series-3008/300/450",
+    "plot": "An astrophysicist hears a signal that answers her in her own voice.",
+    "cast": "Hana Sato, Diego Alvarez, Ruth Okonkwo",
+    "director": "Jonas Berg",
+    "genre": "Crime",
+    "rating": "6.6",
+    "releaseDate": "2022-11-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer09",
+    "episode_run_time": "28",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3008/640/360"
+    ]
+  },
+  {
+    "series_id": 3009,
+    "num": 10,
+    "name": "Mock Series #10",
+    "category_id": "1",
+    "cover": "https://picsum.photos/seed/rtv-series-3009/300/450",
+    "plot": "In a city of endless rain, an archivist discovers files that predict murders.",
+    "cast": "Tomas Weber, Aisha Bello, Luc Moreau",
+    "director": "Jonas Berg",
+    "genre": "Comedy",
+    "rating": "7.0",
+    "releaseDate": "2022-12-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer10",
+    "episode_run_time": "50",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3009/640/360"
+    ]
+  },
+  {
+    "series_id": 3010,
+    "num": 11,
+    "name": "Mock Series #11",
+    "category_id": "1",
+    "cover": "https://picsum.photos/seed/rtv-series-3010/300/450",
+    "plot": "Two rival chefs share one kitchen and a decade-old feud.",
+    "cast": "Hana Sato, Diego Alvarez, Ruth Okonkwo",
+    "director": "Aylin Demir",
+    "genre": "Thriller",
+    "rating": "8.7",
+    "releaseDate": "2024-06-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer11",
+    "episode_run_time": "45",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3010/640/360"
+    ]
+  },
+  {
+    "series_id": 3011,
+    "num": 12,
+    "name": "Mock Series #12",
+    "category_id": "1",
+    "cover": "https://picsum.photos/seed/rtv-series-3011/300/450",
+    "plot": "A family vineyard, a forged will, and a summer that will not end.",
+    "cast": "Ela Yilmaz, Marcus Chen, Priya Nair",
+    "director": "Jonas Berg",
+    "genre": "Sci-Fi",
+    "rating": "8.9",
+    "releaseDate": "2017-04-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer12",
+    "episode_run_time": "45",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3011/640/360"
+    ]
+  },
+  {
+    "series_id": 3012,
+    "num": 13,
+    "name": "Mock Series #13",
+    "category_id": "2",
+    "cover": "https://picsum.photos/seed/rtv-series-3012/300/450",
+    "plot": "A taxi driver's nightly routes weave a map of the city's buried crimes.",
+    "cast": "Marek Nowak, Sofia Rossi, Jin Park",
+    "director": "Jonas Berg",
+    "genre": "Mystery",
+    "rating": "6.1",
+    "releaseDate": "2023-09-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer13",
+    "episode_run_time": "50",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3012/640/360"
+    ]
+  },
+  {
+    "series_id": 3013,
+    "num": 14,
+    "name": "Mock Series #14",
+    "category_id": "1",
+    "cover": "https://picsum.photos/seed/rtv-series-3013/300/450",
+    "plot": "A family vineyard, a forged will, and a summer that will not end.",
+    "cast": "Marek Nowak, Sofia Rossi, Jin Park",
+    "director": "Ken Watanabe",
+    "genre": "Mystery",
+    "rating": "6.4",
+    "releaseDate": "2014-09-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer14",
+    "episode_run_time": "45",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3013/640/360"
+    ]
+  },
+  {
+    "series_id": 3014,
+    "num": 15,
+    "name": "Mock Series #15",
+    "category_id": "1",
+    "cover": "https://picsum.photos/seed/rtv-series-3014/300/450",
+    "plot": "The crew of a salvage ship stumbles on a wreck nobody wants found.",
+    "cast": "Ela Yilmaz, Marcus Chen, Priya Nair",
+    "director": "Aylin Demir",
+    "genre": "Thriller",
+    "rating": "8.0",
+    "releaseDate": "2024-11-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer15",
+    "episode_run_time": "45",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3014/640/360"
+    ]
+  },
+  {
+    "series_id": 3015,
+    "num": 16,
+    "name": "Mock Series #16",
+    "category_id": "1",
+    "cover": "https://picsum.photos/seed/rtv-series-3015/300/450",
+    "plot": "The crew of a salvage ship stumbles on a wreck nobody wants found.",
+    "cast": "Marek Nowak, Sofia Rossi, Jin Park",
+    "director": "Ken Watanabe",
+    "genre": "Sci-Fi",
+    "rating": "9.4",
+    "releaseDate": "2020-05-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer16",
+    "episode_run_time": "50",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3015/640/360"
+    ]
+  },
+  {
+    "series_id": 3016,
+    "num": 17,
+    "name": "Mock Series #17",
+    "category_id": "2",
+    "cover": "https://picsum.photos/seed/rtv-series-3016/300/450",
+    "plot": "A detective returns to her hometown and finds every greeting hides a secret.",
+    "cast": "Ela Yilmaz, Marcus Chen, Priya Nair",
+    "director": "Carmen Ruiz",
+    "genre": "Crime",
+    "rating": "6.9",
+    "releaseDate": "2016-07-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer17",
+    "episode_run_time": "32",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3016/640/360"
+    ]
+  },
+  {
+    "series_id": 3017,
+    "num": 18,
+    "name": "Mock Series #18",
+    "category_id": "1",
+    "cover": "https://picsum.photos/seed/rtv-series-3017/300/450",
+    "plot": "A retiring locksmith receives keys to doors that were never built.",
+    "cast": "Ela Yilmaz, Marcus Chen, Priya Nair",
+    "director": "Carmen Ruiz",
+    "genre": "Sci-Fi",
+    "rating": "8.5",
+    "releaseDate": "2020-02-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer18",
+    "episode_run_time": "42",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3017/640/360"
+    ]
+  },
+  {
+    "series_id": 3018,
+    "num": 19,
+    "name": "Mock Series #19",
+    "category_id": "1",
+    "cover": "https://picsum.photos/seed/rtv-series-3018/300/450",
+    "plot": "Two rival chefs share one kitchen and a decade-old feud.",
+    "cast": "Tomas Weber, Aisha Bello, Luc Moreau",
+    "director": "Carmen Ruiz",
+    "genre": "Thriller",
+    "rating": "7.6",
+    "releaseDate": "2024-09-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer19",
+    "episode_run_time": "28",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3018/640/360"
+    ]
+  },
+  {
+    "series_id": 3019,
+    "num": 20,
+    "name": "Mock Series #20",
+    "category_id": "1",
+    "cover": "https://picsum.photos/seed/rtv-series-3019/300/450",
+    "plot": "An astrophysicist hears a signal that answers her in her own voice.",
+    "cast": "Marek Nowak, Sofia Rossi, Jin Park",
+    "director": "Aylin Demir",
+    "genre": "Drama",
+    "rating": "9.1",
+    "releaseDate": "2025-05-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer20",
+    "episode_run_time": "32",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3019/640/360"
+    ]
+  },
+  {
+    "series_id": 3020,
+    "num": 21,
+    "name": "Mock Series #21",
+    "category_id": "2",
+    "cover": "https://picsum.photos/seed/rtv-series-3020/300/450",
+    "plot": "A detective returns to her hometown and finds every greeting hides a secret.",
+    "cast": "Tomas Weber, Aisha Bello, Luc Moreau",
+    "director": "Aylin Demir",
+    "genre": "Drama",
+    "rating": "8.4",
+    "releaseDate": "2025-02-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer21",
+    "episode_run_time": "50",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3020/640/360"
+    ]
+  },
+  {
+    "series_id": 3021,
+    "num": 22,
+    "name": "Mock Series #22",
+    "category_id": "1",
+    "cover": "https://picsum.photos/seed/rtv-series-3021/300/450",
+    "plot": "In a city of endless rain, an archivist discovers files that predict murders.",
+    "cast": "Tomas Weber, Aisha Bello, Luc Moreau",
+    "director": "Ken Watanabe",
+    "genre": "Sci-Fi",
+    "rating": "6.2",
+    "releaseDate": "2020-10-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer22",
+    "episode_run_time": "45",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3021/640/360"
+    ]
+  },
+  {
+    "series_id": 3022,
+    "num": 23,
+    "name": "Mock Series #23",
+    "category_id": "1",
+    "cover": "https://picsum.photos/seed/rtv-series-3022/300/450",
+    "plot": "Two rival chefs share one kitchen and a decade-old feud.",
+    "cast": "Tomas Weber, Aisha Bello, Luc Moreau",
+    "director": "Carmen Ruiz",
+    "genre": "Comedy",
+    "rating": "9.4",
+    "releaseDate": "2022-06-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer23",
+    "episode_run_time": "45",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3022/640/360"
+    ]
+  },
+  {
+    "series_id": 3023,
+    "num": 24,
+    "name": "Mock Series #24",
+    "category_id": "1",
+    "cover": "https://picsum.photos/seed/rtv-series-3023/300/450",
+    "plot": "A retiring locksmith receives keys to doors that were never built.",
+    "cast": "Ela Yilmaz, Marcus Chen, Priya Nair",
+    "director": "Jonas Berg",
+    "genre": "Thriller",
+    "rating": "5.8",
+    "releaseDate": "2012-10-01",
+    "youtube_trailer": "https://www.youtube.com/watch?v=mocktrailer24",
+    "episode_run_time": "50",
+    "backdrop_path": [
+      "https://picsum.photos/seed/rtv-series-bd-3023/640/360"
+    ]
+  }
+]
