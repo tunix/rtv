@@ -60,6 +60,8 @@ pub struct Ratings {
     /// 16:9 backdrop artwork from Cinemeta — doubles as the trailer
     /// row thumbnail.
     pub backdrop: Option<String>,
+    /// Metacritic score ("74"), when the OMDb lookup reports one.
+    pub metascore: Option<String>,
 }
 
 /// Disk cache freshness window; ratings drift slowly.
@@ -151,11 +153,13 @@ fn read_cache(key: &str) -> Option<Ratings> {
     // Entries from older schema versions (missing fields) count as
     // stale, so a lookup refreshes them with the new data.
     value.get("backdrop")?;
+    value.get("metascore")?;
     Some(Ratings {
         imdb: str_field(&value, "imdb"),
         rt: str_field(&value, "rt"),
         imdb_id: str_field(&value, "imdb_id"),
         backdrop: str_field(&value, "backdrop"),
+        metascore: str_field(&value, "metascore"),
     })
 }
 
@@ -166,6 +170,7 @@ fn write_cache(key: &str, ratings: &Ratings) {
         "rt": ratings.rt,
         "imdb_id": ratings.imdb_id,
         "backdrop": ratings.backdrop,
+        "metascore": ratings.metascore,
     });
     let _ = fs::write(cache_dir().join(key), entry.to_string());
 }
@@ -200,10 +205,10 @@ fn fetch_chain(
                     if let Some(value) = &value {
                         fill_tvmaze(value, &name, &year, &mut ratings.borrow_mut());
                     }
-                    finish(&done, &ratings);
+                    omdb_then_fire(kind, &name, year.clone(), &done, &ratings);
                 });
             } else {
-                finish(&done, &ratings);
+                omdb_then_fire(Kind::Vod, &name, year, &done, &ratings);
             }
             return;
         };
@@ -217,7 +222,7 @@ fn fetch_chain(
                     pending.backdrop = value.get("meta").and_then(|m| str_field(m, "background"));
                 }
             }
-            finish(&done, &ratings);
+            omdb_then_fire(kind, &name, year, &done, &ratings);
         });
     });
 }
@@ -227,6 +232,89 @@ fn finish(done: &Rc<RefCell<Option<DoneCallback>>>, ratings: &Rc<RefCell<Ratings
     let snapshot = ratings.borrow().clone();
     if let Some(done) = done.borrow_mut().take() {
         done(Some(snapshot));
+    }
+}
+
+/// The terminal step of every provider chain: with an OMDb API key
+/// present (`RTV_OMDB_KEY`), the freshest IMDb rating, the Rotten
+/// Tomatoes score and the Metascore are merged into the result before it
+/// reaches the caller. OMDb matches by title (the panel's name);
+/// unmatched titles keep whatever the keyless chain found.
+fn omdb_then_fire(
+    kind: Kind,
+    name: &str,
+    year: Option<String>,
+    done: &Rc<RefCell<Option<DoneCallback>>>,
+    ratings: &Rc<RefCell<Ratings>>,
+) {
+    let _ = kind;
+    match omdb_key() {
+        None => finish(done, ratings),
+        Some(key) => {
+            let query = glib::uri_escape_string(name.trim(), None::<&str>, false).to_string();
+            let year_param = year
+                .as_ref()
+                .map(|y| format!("&y={}", glib::uri_escape_string(y, None::<&str>, false)))
+                .unwrap_or_default();
+            let url = format!("https://www.omdbapi.com/?apikey={key}&t={query}{year_param}");
+            let done = done.clone();
+            let ratings = ratings.clone();
+            let name = name.to_string();
+            get_json(&url, move |value| {
+                if let Some(value) = &value {
+                    fill_omdb(value, &name, &mut ratings.borrow_mut());
+                }
+                finish(&done, &ratings);
+            });
+        }
+    }
+}
+
+/// The OMDb API key from `RTV_OMDB_KEY`, read fresh on every lookup so
+/// it can be changed without a restart. None when unset.
+fn omdb_key() -> Option<String> {
+    std::env::var("RTV_OMDB_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+        .map(|key| key.trim().to_string())
+}
+
+/// Merge the OMDb response into the ratings: the freshest IMDb rating,
+/// the Rotten Tomatoes score and the Metascore. The Title must loosely
+/// match the looked-up name (guards against wrong matches); "N/A" values
+/// stay absent.
+fn fill_omdb(value: &Value, name: &str, ratings: &mut Ratings) {
+    if str_field(value, "Response").as_deref() != Some("True") {
+        return;
+    }
+    let Some(title) = str_field(value, "Title") else {
+        return;
+    };
+    let wanted = name.trim().to_lowercase();
+    if !title.to_lowercase().starts_with(&wanted) {
+        return;
+    }
+    if let Some(rating) = str_field(value, "imdbRating") {
+        ratings.imdb = Some(rating);
+    }
+    if let Some(rt) = str_field(value, "Ratings").and_then(|_| {
+        value
+            .get("Ratings")
+            .and_then(Value::as_array)
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|r| r.get("Source").and_then(Value::as_str) == Some("Rotten Tomatoes"))
+                    .and_then(|r| r.get("Value").and_then(Value::as_str))
+            })
+            .map(|v| v.trim_end_matches('%').to_string())
+    }) {
+        ratings.rt = Some(rt);
+    }
+    if let Some(meta) = str_field(value, "Metascore").filter(|m| m != "N/A") {
+        ratings.metascore = Some(meta);
+    }
+    if let Some(id) = str_field(value, "imdbID") {
+        ratings.imdb_id = Some(id);
     }
 }
 
@@ -458,6 +546,7 @@ mod tests {
         let ratings = Ratings {
             imdb: Some("9.2".to_string()),
             rt: None,
+            metascore: None,
             imdb_id: Some("tt0903747".to_string()),
             backdrop: Some(
                 "https://images.metahub.space/background/medium/tt0903747/img".to_string(),
@@ -475,6 +564,7 @@ mod tests {
         let round = Ratings {
             imdb: str_field(&value, "imdb"),
             rt: str_field(&value, "rt"),
+            metascore: str_field(&value, "metascore"),
             imdb_id: str_field(&value, "imdb_id"),
             backdrop: str_field(&value, "backdrop"),
         };
