@@ -220,6 +220,7 @@ impl Window {
             collapsed.clear();
             collapsed.extend(Kind::SIDEBAR.iter().enumerate().map(|(i, _)| i != 0));
         }
+        window.refresh_rows_visibility();
         // Template children of the NavigationView (detail/episodes/player
         // pages) end up on the stack while the builder constructs the widget
         // tree, so the window would otherwise open on an empty page. Reset
@@ -387,8 +388,10 @@ impl Window {
         let favorites_row = gtk::ListBoxRow::new();
         let favorites_box = gtk::Box::builder().spacing(6).build();
         favorites_box.append(
+            // Bundled icon: the theme's emblem-favorite-symbolic is missing
+            // in current Adwaita, and the colored fallback renders RED.
             &gtk::Image::builder()
-                .icon_name("emblem-favorite-symbolic")
+                .icon_name("rtv-heart-symbolic")
                 .pixel_size(14)
                 .valign(gtk::Align::Center)
                 .build(),
@@ -1183,13 +1186,16 @@ impl Window {
         let (header, _) = detail_header(name, ctx.cover.as_deref(), &series_meta_lines(&meta));
         imp.detail_content.append(&header);
 
+        // Rating-source chips sit right below the "künye" (cover +
+        // metadata block).
+        imp.detail_content.append(&source_chips_row(
+            name,
+            meta.rating.as_deref().filter(|r| *r != "0"),
+        ));
+
         if let Some(plot) = &meta.plot {
             imp.detail_content.append(&plot_label(plot));
         }
-
-        // Deep links into the usual rating/reference sources; they are
-        // title searches, since the panels carry no source-specific ids.
-        imp.detail_content.append(&links_row(name));
 
         // Trailers get their own section above Seasons: a series can carry
         // several of them (even one per season).
@@ -1291,21 +1297,28 @@ impl Window {
                 );
             }
             row.set_child(Some(&row_box));
+            // GtkListBox with selection NONE marks its rows inert: rows
+            // must be explicitly activatable for boxed-list click rows.
+            row.set_activatable(true);
 
             // Activating a season opens the episodes page: the detail
             // page's header stays on top, the season's episodes are
             // listed below.
-            let info = info.clone();
-            let ctx = ctx.clone();
-            let season_number = season.number;
-            let win = self.downgrade();
-            row.connect_activated(move |_| {
-                if let Some(win) = win.upgrade() {
-                    win.show_episodes(&info, &ctx, season_number);
-                }
-            });
             list.append(&row);
         }
+        // Routed via the list's row-activated signal (the same proven
+        // mechanism as the sidebar): per-row ActionRow "activated" does
+        // not fire reliably in every panel setup.
+        let info = info.clone();
+        let ctx = ctx.clone();
+        let win = self.downgrade();
+        list.connect_row_activated(move |_, row| {
+            if let Some(season) = info.seasons.get(row.index() as usize) {
+                if let Some(win) = win.upgrade() {
+                    win.show_episodes(&info, &ctx, season.number);
+                }
+            }
+        });
         seasons_box.append(&list);
     }
 
@@ -1351,22 +1364,36 @@ impl Window {
             .css_classes(["boxed-list"])
             .build();
         for episode in &episodes {
-            list.append(&episode_row(
-                episode,
-                ctx.id,
-                &ctx.name,
-                season_number,
-                self.downgrade(),
-            ));
+            let row = episode_row(episode);
+            // GtkListBox with selection NONE marks its rows inert; the
+            // click routing lives on the list (see below).
+            row.set_activatable(true);
+            list.append(&row);
         }
+        let episodes = episodes.clone();
+        let ctx = ctx.clone();
+        let win = self.downgrade();
+        list.connect_row_activated(move |_, row| {
+            if let Some(episode) = episodes.get(row.index() as usize) {
+                if let Some(win) = win.upgrade() {
+                    win.play_episode(
+                        ctx.id,
+                        &ctx.name,
+                        season_number,
+                        episode.number,
+                        &episode.title,
+                    );
+                }
+            }
+        });
         imp.episodes_content.append(&list);
         imp.main_view.push(&*imp.episodes_page);
     }
 
     /// Movie body, laid out like the series page: cover with the Key:
-    /// value details to its right, a prominent Play button, then
-    /// trailers, links and the plot at the very bottom. The details
-    /// arrive async and fill into the header's info column.
+    /// value details to its right, rating-source chips below the künye,
+    /// a prominent Play button, then trailers (when present). The plot
+    /// renders as the last künye line, under Duration.
     fn open_vod_details(
         &self,
         id: i64,
@@ -1376,10 +1403,16 @@ impl Window {
         generation: u64,
     ) {
         let imp = self.imp();
-        let imdb = rating.filter(|r| r != "0").map(|r| ("IMDb".to_string(), r));
-        let (header, info_col) = detail_header(name, cover, &[imdb]);
+        let (header, info_col) = detail_header(name, cover, &[]);
         imp.detail_content.append(&header);
         info_col.append(&spinner());
+
+        // Rating-source chips sit right below the künye, above Play; the
+        // IMDb chip carries the panel's rating.
+        imp.detail_content.append(&source_chips_row(
+            name,
+            rating.as_deref().filter(|r| *r != "0"),
+        ));
 
         let play = gtk::Button::builder()
             .label("Play")
@@ -1411,7 +1444,8 @@ impl Window {
     }
 
     /// Fill the movie header's info column with the fetched Key: value
-    /// details, then trailers, links and (last) the plot.
+    /// details (the plot is the last line, under Duration) and add the
+    /// trailers section when the panel carries one.
     fn fill_vod_details(
         &self,
         id: i64,
@@ -1437,6 +1471,7 @@ impl Window {
             info.cast.map(|v| ("Cast", v)),
             info.director.map(|v| ("Director", v)),
             info.duration.map(|v| ("Duration", format_duration(&v))),
+            info.plot.map(|v| ("Description", v)),
         ]
         .into_iter()
         .flatten()
@@ -1448,10 +1483,6 @@ impl Window {
         let trailers: Vec<String> = info.trailer.into_iter().collect();
         if let Some(section) = trailers_section(self, Kind::Vod, id, name, &trailers) {
             imp.detail_content.append(&section);
-        }
-        imp.detail_content.append(&links_row(name));
-        if let Some(plot) = &info.plot {
-            imp.detail_content.append(&plot_label(plot));
         }
     }
 
@@ -1588,16 +1619,12 @@ fn kv_line(key: &str, value: &str) -> gtk::Label {
         .build()
 }
 
-/// The shared series header lines: Genre, IMDb, Released, Cast, Director
-/// and episode length. The panel only carries the IMDb rating; further
-/// review-site scores appear here once a source provides them.
+/// The shared series header lines: Genre, Released, Cast, Director and
+/// episode length. The IMDb rating lives in the source chip below the
+/// header, so it is not repeated here.
 fn series_meta_lines(meta: &SeriesMeta) -> Vec<Option<(String, String)>> {
     [
         meta.genre.clone().map(|v| ("Genre".to_string(), v)),
-        meta.rating
-            .clone()
-            .filter(|r| r != "0")
-            .map(|v| ("IMDb".to_string(), v)),
         meta.release_date
             .clone()
             .map(|v| ("Released".to_string(), v)),
@@ -1635,6 +1662,7 @@ fn trailers_section(
         .activate_on_single_click(true)
         .css_classes(["boxed-list"])
         .build();
+    let mut titles = Vec::new();
     for (index, trailer) in trailers.iter().enumerate() {
         let row = adw::ActionRow::new();
         let row_box = gtk::Box::builder()
@@ -1644,7 +1672,9 @@ fn trailers_section(
             .margin_start(12)
             .margin_end(12)
             .build();
-        row_box.append(&cover_art(youtube_thumb(trailer).as_deref(), 64, 36));
+        // Placeholder with a centered play chip when no thumbnail loads;
+        // once it does, the play chip is revealed on hover instead.
+        row_box.append(&trailer_thumb(youtube_thumb(trailer).as_deref()));
         row_box.append(
             &gtk::Label::builder()
                 .label(if trailers.len() == 1 {
@@ -1657,24 +1687,26 @@ fn trailers_section(
                 .hexpand(true)
                 .build(),
         );
-        row_box.append(
-            &gtk::Image::builder()
-                .icon_name("media-playback-start-symbolic")
-                .valign(gtk::Align::Center)
-                .build(),
-        );
         row.set_child(Some(&row_box));
+        // GtkListBox with selection NONE marks its rows inert.
+        row.set_activatable(true);
+        list.append(&row);
 
         // The playback heart keeps favoriting the movie/series itself.
-        let trailer_title = format!("{title} — Trailer {}", index + 1);
-        let win = win.downgrade();
-        row.connect_activated(move |_| {
-            if let Some(win) = win.upgrade() {
-                win.play_with_status(kind, id, &trailer_title, "Trailer");
-            }
-        });
-        list.append(&row);
+        titles.push(format!("{title} — Trailer {}", index + 1));
     }
+    // Routed via the list's row-activated signal (same mechanism as the
+    // sidebar; per-row signals miss inert selection-NONE rows).
+    let win = win.downgrade();
+    let titles = titles;
+    list.connect_row_activated(move |_, row| {
+        let Some(activate_title) = titles.get(row.index() as usize) else {
+            return;
+        };
+        if let Some(win) = win.upgrade() {
+            win.play_with_status(kind, id, activate_title, "Trailer");
+        }
+    });
     section.append(&list);
     Some(section)
 }
@@ -1702,36 +1734,76 @@ fn youtube_thumb(url: &str) -> Option<String> {
 /// the content cards). Falls back to the placeholder on any failure. Once
 /// a real image is loaded, clicking it opens a full-size preview popup.
 fn cover_art(url: Option<&str>, width: i32, height: i32) -> gtk::Overlay {
+    image_card(
+        url,
+        width,
+        height,
+        Some(("video-display-symbolic", 40)),
+        None,
+    )
+}
+
+/// Trailer thumbnail: a centered play chip acts as the placeholder; once
+/// the YouTube thumb loads, the play chip is only revealed on hover.
+fn trailer_thumb(url: Option<&str>) -> gtk::Overlay {
+    let play = gtk::Image::builder()
+        .icon_name("media-playback-start-symbolic")
+        .pixel_size(20)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .css_classes(["play-chip"])
+        .build();
+    image_card(url, 64, 36, None, Some(play))
+}
+
+/// Image card shared by every thumbnail on the detail pages: a rounded
+/// `.card` tile, an optional placeholder icon, an optional image that
+/// fades in on load and an optional overlay image revealed by CSS on row
+/// hover. A loaded image gets the pointer cursor and opens the preview
+/// popup on click; failures keep the placeholder (never crash).
+fn image_card(
+    url: Option<&str>,
+    width: i32,
+    height: i32,
+    placeholder: Option<(&str, i32)>,
+    hover_reveal: Option<gtk::Image>,
+) -> gtk::Overlay {
     let art = gtk::Box::builder()
         .css_classes(["card"])
         .width_request(width)
         .height_request(height)
         .valign(gtk::Align::Start)
         .build();
-    let placeholder = gtk::Image::builder()
-        .icon_name("video-display-symbolic")
-        .pixel_size(40)
-        .halign(gtk::Align::Center)
-        .valign(gtk::Align::Center)
-        .build();
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&art));
+
+    if let Some((icon, pixel)) = placeholder {
+        overlay.add_overlay(
+            &gtk::Image::builder()
+                .icon_name(icon)
+                .pixel_size(pixel)
+                .halign(gtk::Align::Center)
+                .valign(gtk::Align::Center)
+                .build(),
+        );
+    }
+
     let picture = gtk::Picture::builder()
         .content_fit(gtk::ContentFit::Cover)
         .width_request(width)
         .height_request(height)
         .visible(false)
         .build();
-
-    let overlay = gtk::Overlay::new();
-    overlay.set_child(Some(&art));
-    overlay.add_overlay(&placeholder);
     overlay.add_overlay(&picture);
+    if let Some(hover) = &hover_reveal {
+        overlay.add_overlay(hover);
+    }
 
     let loaded = std::rc::Rc::new(RefCell::new(None::<gtk::gdk::Texture>));
     if let Some(url) = url {
         let loaded = loaded.clone();
         crate::covers::fetch(url.to_string(), {
             let picture = picture.clone();
-            let placeholder = placeholder.clone();
             let overlay = overlay.clone();
             move |path| {
                 if let Some(path) = path {
@@ -1739,7 +1811,9 @@ fn cover_art(url: Option<&str>, width: i32, height: i32) -> gtk::Overlay {
                         loaded.replace(Some(texture.clone()));
                         picture.set_paintable(Some(&texture));
                         picture.set_visible(true);
-                        placeholder.set_visible(false);
+                        if let Some(hover) = &hover_reveal {
+                            hover.add_css_class("hover-reveal");
+                        }
                         if let Some(cursor) = gtk::gdk::Cursor::from_name("pointer", None) {
                             overlay.set_cursor(Some(&cursor));
                         }
@@ -1764,16 +1838,19 @@ fn cover_art(url: Option<&str>, width: i32, height: i32) -> gtk::Overlay {
     overlay
 }
 
-/// Modal preview popup showing the same image at full size; clicking it
-/// or pressing Escape closes it.
+/// Full-size image preview popup, sized to the image's aspect ratio and
+/// generously large. Closes via the corner button, Escape or by clicking
+/// anywhere outside it (losing keyboard focus).
 fn open_preview(parent: &impl glib::object::IsA<gtk::Widget>, texture: &gtk::gdk::Texture) {
     let window = adw::Window::new();
-    window.set_modal(true);
     if let Some(root) = parent.root().and_downcast::<adw::ApplicationWindow>() {
         window.set_transient_for(Some(&root));
     }
+    // Not modal on purpose: a modal grab would swallow the outside
+    // clicks that are supposed to dismiss the preview.
     window.set_title(Some("Preview"));
-    window.set_default_size(760, 560);
+    let (width, height) = preview_size(texture);
+    window.set_default_size(width, height);
 
     let picture = gtk::Picture::builder()
         .paintable(texture)
@@ -1781,13 +1858,23 @@ fn open_preview(parent: &impl glib::object::IsA<gtk::Widget>, texture: &gtk::gdk
         .hexpand(true)
         .vexpand(true)
         .build();
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&picture));
 
-    let click = gtk::GestureClick::new();
-    click.connect_pressed({
+    let close = gtk::Button::builder()
+        .icon_name("window-close-symbolic")
+        .tooltip_text("Close")
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::Start)
+        .margin_top(12)
+        .margin_end(12)
+        .css_classes(["osd", "circular"])
+        .build();
+    close.connect_clicked({
         let window = window.clone();
-        move |_, _, _, _| window.close()
+        move |_| window.close()
     });
-    picture.add_controller(click);
+    overlay.add_overlay(&close);
 
     let keys = gtk::EventControllerKey::new();
     keys.connect_key_pressed({
@@ -1801,10 +1888,36 @@ fn open_preview(parent: &impl glib::object::IsA<gtk::Widget>, texture: &gtk::gdk
             }
         }
     });
-    picture.add_controller(keys);
+    overlay.add_controller(keys);
 
-    window.set_content(Some(&picture));
+    // Clicking anything outside the popup takes focus away from it.
+    window.connect_is_active_notify(|window| {
+        if !window.is_active() {
+            window.close();
+        }
+    });
+
+    window.set_content(Some(&overlay));
     window.present();
+}
+
+/// Window size for the preview: the image's aspect ratio, scaled into a
+/// generous maximum (it may exceed the app window a little). Tiny mock
+/// thumbnails are upscaled at most 3x so the window stays reasonable.
+fn preview_size(texture: &gtk::gdk::Texture) -> (i32, i32) {
+    const MAX_W: f64 = 1200.0;
+    const MAX_H: f64 = 800.0;
+    const MAX_UPSCALE: f64 = 3.0;
+    let width = texture.intrinsic_width() as f64;
+    let height = texture.intrinsic_height() as f64;
+    if width <= 0.0 || height <= 0.0 {
+        return (900, 640);
+    }
+    let scale = (MAX_W / width).min(MAX_H / height).min(MAX_UPSCALE);
+    (
+        (width * scale).round() as i32,
+        (height * scale).round() as i32,
+    )
 }
 
 /// Centered spinner used as the placeholder of async-filled sections.
@@ -1848,28 +1961,69 @@ fn section_title(text: &str) -> gtk::Label {
         .build()
 }
 
-/// Deep links into the usual reference sources for a title. The panels
-/// carry no source-specific ids, so these are title searches.
-fn links_row(title: &str) -> gtk::Box {
+/// "Ying-yang" source chips: the left half names the source, the right
+/// half shows its score — or an external-link arrow when the source
+/// carries no rating data. Activating opens the source in the browser.
+/// The panels carry no source-specific ids, so these are title searches.
+fn source_chips_row(title: &str, imdb: Option<&str>) -> gtk::Box {
     let query = glib::uri_escape_string(title, None::<&str>, false);
     let row = gtk::Box::builder()
-        .spacing(12)
+        .spacing(6)
         .halign(gtk::Align::Start)
         .build();
-    for (label, url) in [
-        ("IMDb", format!("https://www.imdb.com/find/?q={query}")),
-        (
-            "Rotten Tomatoes",
-            format!("https://www.rottentomatoes.com/search?search={query}"),
-        ),
-        (
-            "Wikipedia",
-            format!("https://en.wikipedia.org/w/index.php?search={query}"),
-        ),
-    ] {
-        row.append(&gtk::LinkButton::builder().label(label).uri(url).build());
-    }
+    row.append(&source_chip(
+        "IMDb",
+        imdb,
+        format!("https://www.imdb.com/find/?q={query}"),
+    ));
+    row.append(&source_chip(
+        "Rotten Tomatoes",
+        None,
+        format!("https://www.rottentomatoes.com/search?search={query}"),
+    ));
+    row.append(&source_chip(
+        "Wikipedia",
+        None,
+        format!("https://en.wikipedia.org/w/index.php?search={query}"),
+    ));
     row
+}
+
+/// One source chip: source name | score (or an arrow when unrated).
+fn source_chip(source: &str, score: Option<&str>, url: String) -> gtk::Button {
+    let content = gtk::Box::builder().spacing(8).build();
+    content.append(
+        &gtk::Label::builder()
+            .label(source)
+            .css_classes(["heading"])
+            .build(),
+    );
+    content.append(
+        &gtk::Separator::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .build(),
+    );
+    match score {
+        Some(score) => content.append(&gtk::Label::new(Some(score))),
+        None => content.append(
+            &gtk::Label::builder()
+                .label("↗")
+                .css_classes(["dim-label"])
+                .build(),
+        ),
+    }
+    let button = gtk::Button::builder()
+        .child(&content)
+        .tooltip_text(format!("Open {source}"))
+        .css_classes(["pill"])
+        .build();
+    button.connect_clicked(move |_| {
+        // gtk_uri_launcher_present would be the modern API; show_uri
+        // still opens the default browser with zero ceremony.
+        #[allow(deprecated)]
+        gtk::show_uri(None::<&gtk::Window>, &url, gtk::gdk::CURRENT_TIME);
+    });
+    button
 }
 
 /// "0:02:06:00" / "0:36:00" panel durations become "2 hours 6 minutes" /
@@ -1910,16 +2064,10 @@ fn format_duration(raw: &str) -> String {
     }
 }
 
-/// One episode row inside the season view: thumbnail, title, duration,
-/// container and plot; activation plays the episode (favoriting stays on
-/// the parent series).
-fn episode_row(
-    episode: &Episode,
-    series_id: i64,
-    series_name: &str,
-    season: i64,
-    win: glib::WeakRef<Window>,
-) -> gtk::ListBoxRow {
+/// One episode row inside the episodes page: thumbnail, title, duration,
+/// container and plot. Activation (playing the episode, favoriting the
+/// parent series) is routed by the surrounding list.
+fn episode_row(episode: &Episode) -> gtk::ListBoxRow {
     let row = gtk::ListBoxRow::new();
     let row_box = gtk::Box::builder()
         .spacing(12)
@@ -1976,21 +2124,6 @@ fn episode_row(
     }
     row_box.append(&text);
     row.set_child(Some(&row_box));
-
-    let episode_title = episode.title.clone();
-    let episode_number = episode.number;
-    let series_name = series_name.to_string();
-    row.connect_activate(move |_| {
-        if let Some(win) = win.upgrade() {
-            win.play_episode(
-                series_id,
-                &series_name,
-                season,
-                episode_number,
-                &episode_title,
-            );
-        }
-    });
     row
 }
 
