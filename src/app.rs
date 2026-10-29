@@ -55,6 +55,11 @@ pub fn install_runtime_icons() {
 pub fn run() {
     crate::register_resources();
 
+    // The fallback window title (alt-tab for unmatched windows) — libadwaita
+    // ignores GtkWindow:title on AdwWindow, so GTK would otherwise fall
+    // back to the raw application id.
+    glib::set_application_name("RTV");
+
     let app = adw::Application::new(Some("io.github.tunix.rtv"), gio::ApplicationFlags::empty());
 
     // Classic media-player shortcuts. Play/pause is intentionally NOT

@@ -1180,11 +1180,9 @@ impl Window {
         self.stop_pipeline();
 
         if gstreamer::init().is_err() {
-            eprintln!("RTV_PLAYBACK: gst init failed");
             return false;
         }
         let Ok(playbin) = gstreamer::ElementFactory::make("playbin").build() else {
-            eprintln!("RTV_PLAYBACK: playbin missing");
             return false;
         };
         let mut video = false;
@@ -1232,13 +1230,33 @@ impl Window {
                     return glib::ControlFlow::Break;
                 };
                 let mut stop = false;
+                let mut missing_codec = false;
                 while let Some(message) = bus.timed_pop(gstreamer::ClockTime::from_seconds(0)) {
                     match message.view() {
                         gstreamer::MessageView::Eos(..) => stop = true,
+                        gstreamer::MessageView::Element(elem) => {
+                            // gst-plugins-base reports undecodable streams
+                            // as "missing-plugin" element messages; playbin
+                            // keeps running with the audio — surface it
+                            // once instead of stopping the playback.
+                            if elem
+                                .structure()
+                                .map(|s| s.name() == "missing-plugin")
+                                .unwrap_or(false)
+                                && !missing_codec
+                            {
+                                missing_codec = true;
+                                win.toast(
+                                    "Missing codec — video unavailable; install GStreamer decoders (e.g. RPM Fusion gstreamer1-libav)",
+                                );
+                            }
+                        }
                         gstreamer::MessageView::Error(err) => {
                             let _ = err;
-                            if retried.get() {
-                                win.toast("Playback failed — returning to the demo player");
+                            if missing_codec || retried.get() {
+                                win.toast(
+                                    "Missing codec for this stream — install GStreamer decoders (e.g. RPM Fusion gstreamer1-libav)",
+                                );
                                 stop = true;
                             } else {
                                 retried.set(true);
@@ -1404,6 +1422,14 @@ impl Window {
             .as_deref()
             .map(|d| &d[..4])
             .map(str::to_string);
+        // Trailers get their own section above Seasons: a series can carry
+        // several of them (even one per season). Their thumbnails pick up
+        // the title's backdrop artwork from the metadata lookup.
+        let trailers: Vec<String> = meta.trailer.clone().into_iter().collect();
+        let trailer_section = trailers_section(self, Kind::Series, id, name, &trailers);
+        if let Some(section) = &trailer_section {
+            imp.detail_content.append(&section.widget);
+        }
         crate::ratings::lookup(Kind::Series, name, year.as_deref(), move |ratings| {
             let Some(win) = win.upgrade() else {
                 return;
@@ -1412,14 +1438,12 @@ impl Window {
                 return;
             }
             chips.apply(ratings.as_ref(), panel_rating.as_deref());
+            if let Some(ratings) = &ratings {
+                if let Some(section) = &trailer_section {
+                    section.apply_artwork(ratings.backdrop.as_deref());
+                }
+            }
         });
-
-        // Trailers get their own section above Seasons: a series can carry
-        // several of them (even one per season).
-        let trailers: Vec<String> = meta.trailer.clone().into_iter().collect();
-        if let Some(section) = trailers_section(self, Kind::Series, id, name, &trailers) {
-            imp.detail_content.append(&section);
-        }
 
         imp.detail_content.append(&section_title("Seasons"));
         let seasons_box = gtk::Box::builder()
@@ -1631,19 +1655,33 @@ impl Window {
 
         // Rating-source chips sit right below the künye, above Play; the
         // ratings lookup refines the IMDb link and score in place, with
-        // the panel's rating as the offline fallback.
+        // the panel's rating as the offline fallback. The trailers section
+        // arrives with the async vod info, so the section and the looked
+        // up backdrop are shared through slots to connect them.
         let (chips_row, chips) = source_chips_row(name);
         imp.detail_content.append(&chips_row);
+        let trailer_section: Rc<RefCell<Option<TrailerSection>>> = Rc::new(RefCell::new(None));
+        let backdrop: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let win = self.downgrade();
         let panel_rating = panel_rating.filter(|r| r != "0");
-        crate::ratings::lookup(Kind::Vod, name, None, move |ratings| {
-            let Some(win) = win.upgrade() else {
-                return;
-            };
-            if win.imp().details_generation.get() != generation {
-                return;
+        crate::ratings::lookup(Kind::Vod, name, None, {
+            let trailer_section = trailer_section.clone();
+            let backdrop = backdrop.clone();
+            move |ratings| {
+                let Some(win) = win.upgrade() else {
+                    return;
+                };
+                if win.imp().details_generation.get() != generation {
+                    return;
+                }
+                chips.apply(ratings.as_ref(), panel_rating.as_deref());
+                if let Some(ratings) = &ratings {
+                    *backdrop.borrow_mut() = ratings.backdrop.clone();
+                    if let Some(section) = &*trailer_section.borrow() {
+                        section.apply_artwork(ratings.backdrop.as_deref());
+                    }
+                }
             }
-            chips.apply(ratings.as_ref(), panel_rating.as_deref());
         });
 
         // A little distance from the künye/chips block.
@@ -1665,6 +1703,8 @@ impl Window {
         let win = self.downgrade();
         let info_col = info_col.clone();
         let title = name.to_string();
+        let trailer_section = trailer_section.clone();
+        let backdrop = backdrop.clone();
         details::vod_info(id, move |result| {
             let Some(win) = win.upgrade() else {
                 return;
@@ -1673,19 +1713,23 @@ impl Window {
             if i.details_generation.get() != generation {
                 return;
             }
-            win.fill_vod_details(id, &title, &info_col, result);
+            win.fill_vod_details(id, &title, &info_col, result, &trailer_section, &backdrop);
         });
     }
 
     /// Fill the movie header's info column with the fetched Key: value
     /// details (the plot is the last line, under Duration) and add the
-    /// trailers section when the panel carries one.
+    /// trailers section when the panel carries one. The shared slots let
+    /// a metadata backdrop that arrived earlier (or later) reach the
+    /// section either way.
     fn fill_vod_details(
         &self,
         id: i64,
         name: &str,
         info_col: &gtk::Box,
         result: Option<details::VodInfo>,
+        trailer_section: &Rc<RefCell<Option<TrailerSection>>>,
+        backdrop: &Rc<RefCell<Option<String>>>,
     ) {
         let imp = self.imp();
         while let Some(child) = info_col.first_child() {
@@ -1713,11 +1757,15 @@ impl Window {
             info_col.append(&kv_line(key, &value));
         }
 
-        // Trailers play in-app like the series ones.
+        // Trailers play in-app like the series ones; any backdrop the
+        // metadata lookup already delivered fills the thumbnails at once.
         let trailers: Vec<String> = info.trailer.into_iter().collect();
-        if let Some(section) = trailers_section(self, Kind::Vod, id, name, &trailers) {
-            imp.detail_content.append(&section);
+        let section = trailers_section(self, Kind::Vod, id, name, &trailers);
+        if let Some(section) = &section {
+            imp.detail_content.append(&section.widget);
+            section.apply_artwork(backdrop.borrow().as_deref());
         }
+        *trailer_section.borrow_mut() = section;
     }
 
     fn toggle_playing(&self) {
@@ -1889,6 +1937,21 @@ fn series_meta_lines(meta: &SeriesMeta) -> Vec<Option<(String, String)>> {
     .collect()
 }
 
+/// The trailers section plus the thumbnail handles, so the metadata
+/// lookup can hand the rows their artwork afterwards.
+struct TrailerSection {
+    widget: gtk::Box,
+    thumbs: Vec<Rc<ImageCard>>,
+}
+
+impl TrailerSection {
+    fn apply_artwork(&self, backdrop: Option<&str>) {
+        for thumb in &self.thumbs {
+            thumb.load(backdrop);
+        }
+    }
+}
+
 /// Trailers listed as rows with a thumbnail; activating one plays it in
 /// the app (mock player) instead of leaving for a website. Returns None
 /// when there is nothing to list.
@@ -1898,7 +1961,7 @@ fn trailers_section(
     id: i64,
     title: &str,
     trailers: &[String],
-) -> Option<gtk::Box> {
+) -> Option<TrailerSection> {
     if trailers.is_empty() {
         return None;
     }
@@ -1914,6 +1977,7 @@ fn trailers_section(
         .css_classes(["boxed-list"])
         .build();
     let mut entries: Vec<(String, String)> = Vec::new();
+    let mut thumbs: Vec<Rc<ImageCard>> = Vec::new();
     for (index, trailer) in trailers.iter().enumerate() {
         let row = adw::ActionRow::new();
         let row_box = gtk::Box::builder()
@@ -1923,9 +1987,10 @@ fn trailers_section(
             .margin_start(12)
             .margin_end(12)
             .build();
-        // Placeholder with a centered play chip when no thumbnail loads;
-        // once it does, the play chip is revealed on hover instead.
-        row_box.append(&trailer_thumb(youtube_thumb(trailer).as_deref()));
+        // Placeholder with a centered play chip; the metadata lookup
+        // fills the row with the title's backdrop artwork afterwards.
+        let thumb = trailer_thumb(64, 36);
+        row_box.append(&thumb.widget);
         row_box.append(
             &gtk::Label::builder()
                 .label(if trailers.len() == 1 {
@@ -1942,6 +2007,7 @@ fn trailers_section(
         // GtkListBox with selection NONE marks its rows inert.
         row.set_activatable(true);
         list.append(&row);
+        thumbs.push(thumb.clone());
 
         // The playback heart keeps favoriting the movie/series itself.
         entries.push((format!("{title} — Trailer {}", index + 1), trailer.clone()));
@@ -1958,44 +2024,24 @@ fn trailers_section(
         }
     });
     section.append(&list);
-    Some(section)
-}
-
-/// Thumbnail URL for a YouTube trailer link (mqdefault); mock ids do not
-/// resolve, and the cover placeholder covers that gracefully.
-fn youtube_thumb(url: &str) -> Option<String> {
-    let id = url
-        .split('?')
-        .nth(1)
-        .and_then(|query| {
-            query
-                .split('&')
-                .find_map(|pair| pair.strip_prefix("v=").map(str::to_string))
-        })
-        .or_else(|| {
-            url.split("youtu.be/")
-                .nth(1)
-                .and_then(|rest| rest.split(['?', '/']).next().map(str::to_string))
-        })?;
-    (!id.is_empty()).then(|| format!("https://img.youtube.com/vi/{id}/mqdefault.jpg"))
+    Some(TrailerSection {
+        widget: section,
+        thumbs,
+    })
 }
 
 /// Cover art box with placeholder + async picture fill (same mechanics as
 /// the content cards). Falls back to the placeholder on any failure. Once
 /// a real image is loaded, clicking it opens a full-size preview popup.
 fn cover_art(url: Option<&str>, width: i32, height: i32) -> gtk::Overlay {
-    image_card(
-        url,
-        width,
-        height,
-        Some(("video-display-symbolic", 40)),
-        None,
-    )
+    let card = ImageCard::new(width, height, Some(("video-display-symbolic", 40)), None);
+    card.load(url);
+    card.widget.clone()
 }
 
 /// Trailer thumbnail: a centered play chip acts as the placeholder; once
-/// the YouTube thumb loads, the play chip is only revealed on hover.
-fn trailer_thumb(url: Option<&str>) -> gtk::Overlay {
+/// the artwork loads, the play chip is only revealed on hover.
+fn trailer_thumb(width: i32, height: i32) -> Rc<ImageCard> {
     let play = gtk::Image::builder()
         .icon_name("media-playback-start-symbolic")
         .pixel_size(20)
@@ -2003,97 +2049,114 @@ fn trailer_thumb(url: Option<&str>) -> gtk::Overlay {
         .valign(gtk::Align::Center)
         .css_classes(["play-chip"])
         .build();
-    image_card(url, 64, 36, None, Some(play))
+    Rc::new(ImageCard::new(width, height, None, Some(play)))
 }
 
 /// Image card shared by every thumbnail on the detail pages: a rounded
 /// `.card` tile, an optional placeholder icon, an optional image that
 /// fades in on load and an optional overlay image revealed by CSS on row
 /// hover. A loaded image gets the pointer cursor and opens the preview
-/// popup on click; failures keep the placeholder (never crash).
-fn image_card(
-    url: Option<&str>,
-    width: i32,
-    height: i32,
-    placeholder: Option<(&str, i32)>,
+/// popup on click; failures keep the placeholder (never crash). The image
+/// can also be (re)loaded after construction — trailer rows start with a
+/// placeholder and pick up their artwork from the metadata lookup.
+struct ImageCard {
+    widget: gtk::Overlay,
+    picture: gtk::Picture,
     hover_reveal: Option<gtk::Image>,
-) -> gtk::Overlay {
-    let art = gtk::Box::builder()
-        .css_classes(["card"])
-        .width_request(width)
-        .height_request(height)
-        .valign(gtk::Align::Start)
-        .build();
-    let overlay = gtk::Overlay::new();
-    overlay.set_child(Some(&art));
-    // Clip every layer (picture, placeholders, chips) to the rounded
-    // card, so loaded images never poke past the frame corners.
-    overlay.set_overflow(gtk::Overflow::Hidden);
+    loaded: Rc<RefCell<Option<gtk::gdk::Texture>>>,
+}
 
-    if let Some((icon, pixel)) = placeholder {
-        overlay.add_overlay(
-            &gtk::Image::builder()
-                .icon_name(icon)
-                .pixel_size(pixel)
-                .halign(gtk::Align::Center)
-                .valign(gtk::Align::Center)
-                .build(),
-        );
+impl ImageCard {
+    fn new(
+        width: i32,
+        height: i32,
+        placeholder: Option<(&str, i32)>,
+        hover_reveal: Option<gtk::Image>,
+    ) -> Self {
+        let art = gtk::Box::builder()
+            .css_classes(["card"])
+            .width_request(width)
+            .height_request(height)
+            .valign(gtk::Align::Start)
+            .build();
+        let widget = gtk::Overlay::new();
+        widget.set_child(Some(&art));
+        // Clip every layer (picture, placeholders, chips) to the rounded
+        // card, so loaded images never poke past the frame corners.
+        widget.set_overflow(gtk::Overflow::Hidden);
+
+        if let Some((icon, pixel)) = placeholder {
+            widget.add_overlay(
+                &gtk::Image::builder()
+                    .icon_name(icon)
+                    .pixel_size(pixel)
+                    .halign(gtk::Align::Center)
+                    .valign(gtk::Align::Center)
+                    .build(),
+            );
+        }
+
+        let picture = gtk::Picture::builder()
+            .content_fit(gtk::ContentFit::Cover)
+            .width_request(width)
+            .height_request(height)
+            .visible(false)
+            .build();
+        widget.add_overlay(&picture);
+        if let Some(hover) = &hover_reveal {
+            widget.add_overlay(hover);
+        }
+
+        let loaded: Rc<RefCell<Option<gtk::gdk::Texture>>> = std::rc::Rc::new(RefCell::new(None));
+        let click = gtk::GestureClick::new();
+        // Capture phase + explicit claim: the click belongs to the
+        // preview — it must not ALSO activate the surrounding list row.
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        click.connect_pressed({
+            let loaded = loaded.clone();
+            let widget = widget.clone();
+            move |gesture, _, _, _| {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                if let Some(texture) = loaded.borrow().as_ref() {
+                    open_preview(&widget, texture);
+                }
+            }
+        });
+        widget.add_controller(click);
+
+        Self {
+            widget,
+            picture,
+            hover_reveal,
+            loaded,
+        }
     }
 
-    let picture = gtk::Picture::builder()
-        .content_fit(gtk::ContentFit::Cover)
-        .width_request(width)
-        .height_request(height)
-        .visible(false)
-        .build();
-    overlay.add_overlay(&picture);
-    if let Some(hover) = &hover_reveal {
-        overlay.add_overlay(hover);
-    }
-
-    let loaded = std::rc::Rc::new(RefCell::new(None::<gtk::gdk::Texture>));
-    if let Some(url) = url {
-        let loaded = loaded.clone();
-        crate::covers::fetch(url.to_string(), {
-            let picture = picture.clone();
-            let overlay = overlay.clone();
-            move |path| {
-                if let Some(path) = path {
-                    if let Ok(texture) = gtk::gdk::Texture::from_filename(&path) {
-                        loaded.replace(Some(texture.clone()));
-                        picture.set_paintable(Some(&texture));
-                        picture.set_visible(true);
-                        if let Some(hover) = &hover_reveal {
-                            hover.add_css_class("hover-reveal");
-                        }
-                        if let Some(cursor) = gtk::gdk::Cursor::from_name("pointer", None) {
-                            overlay.set_cursor(Some(&cursor));
-                        }
+    /// Fetch `url` into the card; failures keep the placeholder.
+    fn load(&self, url: Option<&str>) {
+        let Some(url) = url else {
+            return;
+        };
+        let picture = self.picture.clone();
+        let hover_reveal = self.hover_reveal.clone();
+        let loaded = self.loaded.clone();
+        let widget = self.widget.clone();
+        crate::covers::fetch(url.to_string(), move |path| {
+            if let Some(path) = path {
+                if let Ok(texture) = gtk::gdk::Texture::from_filename(&path) {
+                    loaded.replace(Some(texture.clone()));
+                    picture.set_paintable(Some(&texture));
+                    picture.set_visible(true);
+                    if let Some(hover) = &hover_reveal {
+                        hover.add_css_class("hover-reveal");
+                    }
+                    if let Some(cursor) = gtk::gdk::Cursor::from_name("pointer", None) {
+                        widget.set_cursor(Some(&cursor));
                     }
                 }
             }
         });
     }
-
-    let click = gtk::GestureClick::new();
-    // Capture phase + explicit claim: the click belongs to the preview —
-    // it must not ALSO activate the surrounding list row.
-    click.set_propagation_phase(gtk::PropagationPhase::Capture);
-    click.connect_pressed({
-        let loaded = loaded.clone();
-        let overlay = overlay.clone();
-        move |gesture, _, x, y| {
-            gesture.set_state(gtk::EventSequenceState::Claimed);
-            let _ = (x, y);
-            if let Some(texture) = loaded.borrow().as_ref() {
-                open_preview(&overlay, texture);
-            }
-        }
-    });
-    overlay.add_controller(click);
-
-    overlay
 }
 
 /// Full-size image preview popup, sized to the image's aspect ratio and
@@ -2211,17 +2274,22 @@ fn section_title(text: &str) -> gtk::Label {
 
 /// The updatable parts of the source chips row: the IMDb chip's score
 /// label and its URL (upgraded to the exact title page once the ratings
-/// lookup resolves the IMDb id).
+/// lookup resolves the IMDb id), plus the RT and Wikipedia score labels.
 struct SourceChips {
     imdb_score: gtk::Label,
     imdb_url: Rc<RefCell<String>>,
+    rt_score: gtk::Label,
+    wiki_score: gtk::Label,
 }
 
 impl SourceChips {
     /// Apply a ratings lookup result: fill the IMDb score and/or point
     /// the IMDb chip at the exact title page. When no source provides a
     /// score, fall back to the panel's own rating; with neither, show
-    /// "N/A" (objective over invented).
+    /// "N/A" (objective over invented). Rotten Tomatoes has no keyless
+    /// source yet and Wikipedia carries no ratings — both settle at
+    /// "N/A" until a metadata provider lands; the chips still open
+    /// their sites.
     fn apply(&self, ratings: Option<&crate::ratings::Ratings>, panel: Option<&str>) {
         match ratings.and_then(|r| r.imdb.as_ref()) {
             Some(score) => {
@@ -2238,6 +2306,21 @@ impl SourceChips {
                     self.imdb_score.set_text("N/A");
                 }
             },
+        }
+        for (label, score) in [
+            (&self.rt_score, ratings.and_then(|r| r.rt.as_ref())),
+            (&self.wiki_score, None),
+        ] {
+            match score {
+                Some(score) => {
+                    label.remove_css_class("dim-label");
+                    label.set_text(score);
+                }
+                None => {
+                    label.add_css_class("dim-label");
+                    label.set_text("N/A");
+                }
+            }
         }
         if let Some(id) = ratings.and_then(|r| r.imdb_id.as_ref()) {
             self.imdb_url
@@ -2267,18 +2350,26 @@ fn source_chips_row(title: &str) -> (gtk::Box, SourceChips) {
         .label("…")
         .css_classes(["dim-label"])
         .build();
+    let rt_score = gtk::Label::builder()
+        .label("…")
+        .css_classes(["dim-label"])
+        .build();
+    let wiki_score = gtk::Label::builder()
+        .label("…")
+        .css_classes(["dim-label"])
+        .build();
     row.append(&source_chip("IMDb", imdb_url.clone(), imdb_score.clone()));
     let rotten_url = format!("https://www.rottentomatoes.com/search?search={query}");
     row.append(&source_chip(
         "Rotten Tomatoes",
         Rc::new(RefCell::new(rotten_url)),
-        arrow_label(),
+        rt_score.clone(),
     ));
     let wiki_url = format!("https://en.wikipedia.org/w/index.php?search={query}");
     row.append(&source_chip(
         "Wikipedia",
         Rc::new(RefCell::new(wiki_url)),
-        arrow_label(),
+        wiki_score.clone(),
     ));
 
     (
@@ -2286,15 +2377,10 @@ fn source_chips_row(title: &str) -> (gtk::Box, SourceChips) {
         SourceChips {
             imdb_score,
             imdb_url,
+            rt_score,
+            wiki_score,
         },
     )
-}
-
-fn arrow_label() -> gtk::Label {
-    gtk::Label::builder()
-        .label("↗")
-        .css_classes(["dim-label"])
-        .build()
 }
 
 /// One source chip: source name | right-half label; the URL is kept in a

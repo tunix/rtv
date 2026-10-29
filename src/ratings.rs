@@ -49,6 +49,9 @@ pub struct Ratings {
     pub rt: Option<String>,
     /// Resolved IMDb id ("tt1375666").
     pub imdb_id: Option<String>,
+    /// 16:9 backdrop artwork from Cinemeta — doubles as the trailer
+    /// row thumbnail.
+    pub backdrop: Option<String>,
 }
 
 /// Disk cache freshness window; ratings drift slowly.
@@ -137,10 +140,14 @@ fn read_cache(key: &str) -> Option<Ratings> {
     if fetched_at + TTL_SECONDS <= now() {
         return None;
     }
+    // Entries from older schema versions (missing fields) count as
+    // stale, so a lookup refreshes them with the new data.
+    value.get("backdrop")?;
     Some(Ratings {
         imdb: str_field(&value, "imdb"),
         rt: str_field(&value, "rt"),
         imdb_id: str_field(&value, "imdb_id"),
+        backdrop: str_field(&value, "backdrop"),
     })
 }
 
@@ -150,6 +157,7 @@ fn write_cache(key: &str, ratings: &Ratings) {
         "imdb": ratings.imdb,
         "rt": ratings.rt,
         "imdb_id": ratings.imdb_id,
+        "backdrop": ratings.backdrop,
     });
     let _ = fs::write(cache_dir().join(key), entry.to_string());
 }
@@ -195,7 +203,11 @@ fn fetch_chain(
         let meta_url = format!("https://v3-cinemeta.strem.io/meta/{meta_type}/{imdb_id}.json");
         get_json(&meta_url, move |value| {
             if let Some(value) = &value {
-                ratings.borrow_mut().imdb = cinemeta_rating(value);
+                {
+                    let mut pending = ratings.borrow_mut();
+                    pending.imdb = cinemeta_rating(value);
+                    pending.backdrop = value.get("meta").and_then(|m| str_field(m, "background"));
+                }
             }
             finish(&done, &ratings);
         });
@@ -439,12 +451,16 @@ mod tests {
             imdb: Some("9.2".to_string()),
             rt: None,
             imdb_id: Some("tt0903747".to_string()),
+            backdrop: Some(
+                "https://images.metahub.space/background/medium/tt0903747/img".to_string(),
+            ),
         };
         let entry = serde_json::json!({
             "fetched_at": now(),
             "imdb": ratings.imdb,
             "rt": ratings.rt,
             "imdb_id": ratings.imdb_id,
+            "backdrop": ratings.backdrop,
         });
         // Re-parse what write_cache stores.
         let value: Value = serde_json::from_str(&entry.to_string()).unwrap();
@@ -452,10 +468,12 @@ mod tests {
             imdb: str_field(&value, "imdb"),
             rt: str_field(&value, "rt"),
             imdb_id: str_field(&value, "imdb_id"),
+            backdrop: str_field(&value, "backdrop"),
         };
         assert_eq!(round.imdb.as_deref(), Some("9.2"));
         assert_eq!(round.imdb_id.as_deref(), Some("tt0903747"));
         assert!(round.rt.is_none());
+        assert!(round.backdrop.is_some());
     }
 
     /// Live provider chain: IMDb suggestion + TVmaze. Ignored by default
