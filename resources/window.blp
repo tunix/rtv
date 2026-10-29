@@ -82,6 +82,7 @@ template $RtvWindow : Adw.ApplicationWindow {
                   hscrollbar-policy: never;
 
                   child: Gtk.ListBox content_list {
+                    activate-on-single-click: true;
                     styles ["navigation-sidebar"]
                   };
                 }
@@ -367,6 +368,35 @@ template $RtvWindow : Adw.ApplicationWindow {
             maximum-size: 720;
 
             child: Gtk.Box detail_content {
+              orientation: vertical;
+              spacing: 12;
+              margin-top: 12;
+              margin-start: 12;
+              margin-end: 12;
+              margin-bottom: 24;
+            };
+          };
+        };
+      };
+      }
+
+      /* Episodes of one season: detail header on top, episodes below. */
+      Adw.NavigationPage episodes_page {
+      title: _("Episodes");
+      can-pop: true;
+
+      child: Adw.ToolbarView {
+
+        [top]
+        Adw.HeaderBar {}
+
+        content: Gtk.ScrolledWindow {
+          hscrollbar-policy: never;
+
+          child: Adw.Clamp {
+            maximum-size: 720;
+
+            child: Gtk.Box episodes_content {
               orientation: vertical;
               spacing: 12;
               margin-top: 12;
