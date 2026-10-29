@@ -2274,22 +2274,18 @@ fn section_title(text: &str) -> gtk::Label {
 
 /// The updatable parts of the source chips row: the IMDb chip's score
 /// label and its URL (upgraded to the exact title page once the ratings
-/// lookup resolves the IMDb id), plus the RT and Wikipedia score labels.
+/// lookup resolves the IMDb id). The Rotten Tomatoes and Wikipedia chips
+/// are link-only — no keyless source carries their ratings.
 struct SourceChips {
     imdb_score: gtk::Label,
     imdb_url: Rc<RefCell<String>>,
-    rt_score: gtk::Label,
-    wiki_score: gtk::Label,
 }
 
 impl SourceChips {
     /// Apply a ratings lookup result: fill the IMDb score and/or point
     /// the IMDb chip at the exact title page. When no source provides a
     /// score, fall back to the panel's own rating; with neither, show
-    /// "N/A" (objective over invented). Rotten Tomatoes has no keyless
-    /// source yet and Wikipedia carries no ratings — both settle at
-    /// "N/A" until a metadata provider lands; the chips still open
-    /// their sites.
+    /// "N/A" (objective over invented).
     fn apply(&self, ratings: Option<&crate::ratings::Ratings>, panel: Option<&str>) {
         match ratings.and_then(|r| r.imdb.as_ref()) {
             Some(score) => {
@@ -2306,21 +2302,6 @@ impl SourceChips {
                     self.imdb_score.set_text("N/A");
                 }
             },
-        }
-        for (label, score) in [
-            (&self.rt_score, ratings.and_then(|r| r.rt.as_ref())),
-            (&self.wiki_score, None),
-        ] {
-            match score {
-                Some(score) => {
-                    label.remove_css_class("dim-label");
-                    label.set_text(score);
-                }
-                None => {
-                    label.add_css_class("dim-label");
-                    label.set_text("N/A");
-                }
-            }
         }
         if let Some(id) = ratings.and_then(|r| r.imdb_id.as_ref()) {
             self.imdb_url
@@ -2350,26 +2331,24 @@ fn source_chips_row(title: &str) -> (gtk::Box, SourceChips) {
         .label("…")
         .css_classes(["dim-label"])
         .build();
-    let rt_score = gtk::Label::builder()
-        .label("…")
-        .css_classes(["dim-label"])
-        .build();
-    let wiki_score = gtk::Label::builder()
-        .label("…")
-        .css_classes(["dim-label"])
-        .build();
-    row.append(&source_chip("IMDb", imdb_url.clone(), imdb_score.clone()));
+    row.append(&source_chip(
+        "IMDb",
+        imdb_url.clone(),
+        Some(imdb_score.clone()),
+    ));
+    // Link-only chips: no keyless source carries RT ratings (yet) and
+    // Wikipedia carries none at all, so they stay single-label pills.
     let rotten_url = format!("https://www.rottentomatoes.com/search?search={query}");
     row.append(&source_chip(
         "Rotten Tomatoes",
         Rc::new(RefCell::new(rotten_url)),
-        rt_score.clone(),
+        None,
     ));
     let wiki_url = format!("https://en.wikipedia.org/w/index.php?search={query}");
     row.append(&source_chip(
         "Wikipedia",
         Rc::new(RefCell::new(wiki_url)),
-        wiki_score.clone(),
+        None,
     ));
 
     (
@@ -2377,15 +2356,14 @@ fn source_chips_row(title: &str) -> (gtk::Box, SourceChips) {
         SourceChips {
             imdb_score,
             imdb_url,
-            rt_score,
-            wiki_score,
         },
     )
 }
 
-/// One source chip: source name | right-half label; the URL is kept in a
-/// RefCell so an upgraded link (exact IMDb title) is used when clicked.
-fn source_chip(source: &str, url: Rc<RefCell<String>>, right: gtk::Label) -> gtk::Button {
+/// One source chip: source name | right-half label when one exists
+/// (IMDb carries its score there); the URL is kept in a RefCell so an
+/// upgraded link (exact IMDb title) is used when clicked.
+fn source_chip(source: &str, url: Rc<RefCell<String>>, right: Option<gtk::Label>) -> gtk::Button {
     let content = gtk::Box::builder().spacing(8).build();
     content.append(
         &gtk::Label::builder()
@@ -2393,12 +2371,14 @@ fn source_chip(source: &str, url: Rc<RefCell<String>>, right: gtk::Label) -> gtk
             .css_classes(["heading"])
             .build(),
     );
-    content.append(
-        &gtk::Separator::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .build(),
-    );
-    content.append(&right);
+    if let Some(right) = &right {
+        content.append(
+            &gtk::Separator::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .build(),
+        );
+        content.append(right);
+    }
     let button = gtk::Button::builder()
         .child(&content)
         .tooltip_text(format!("Open {source}"))
