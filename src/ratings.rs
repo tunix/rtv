@@ -5,19 +5,27 @@
 //! (Mock mode fetches artwork the same way, so lookups run there too;
 //! offline they fail gracefully.)
 //!
-//! Provider chain (all keyless, all speaking JSON):
-//! - **Cinemeta** (Stremio's metadata addon; movies AND series): the
-//!   catalog search resolves a title to its IMDb id, and the meta
-//!   endpoint carries `imdbRating` — the score for both kinds.
+//! Provider chain (all speaking JSON):
+//! - **Cinemeta** (Stremio's metadata addon, keyless; movies AND series):
+//!   the catalog search resolves a title to its IMDb id, and the meta
+//!   endpoint carries `imdbRating` + the 16:9 backdrop.
 //! - **TVmaze search** (series fallback when Cinemeta misses): carries
 //!   the IMDb-sourced average rating.
+//! - **OMDb** (free API key): one call returns the fresher IMDb rating,
+//!   the Rotten Tomatoes score and the Metascore, so a Metacritic chip
+//!   can join the row. The key comes from `RTV_OMDB_KEY` until the
+//!   source-settings dialog exists.
+//!
+//! TODO(backend): the settings page should collect the OMDb API key and
+//! store it in the GNOME Keyring (see AGENTS.md — credentials never in
+//! plain files); `RTV_OMDB_KEY` is the temporary channel. The
+//! environment is only read when a lookup runs, never logged.
 //!
 //! Rotten Tomatoes has no keyless JSON source (its search results are
-//! rendered client-side); its score stays reserved for a proper metadata
-//! provider (OMDb/TMDB with a user-supplied key) in the backend phase —
-//! the ratings struct and chip plumbing are already shaped for it. When
-//! no source provides a score, the UI falls back to the panel's own
-//! rating and finally to "N/A".
+//! rendered client-side) — its score arrives through OMDb instead. The
+//! RT and Wikipedia chips are deliberately link-only per design.
+//! When no source provides a score, the UI falls back to the panel's
+//! own rating and finally to "N/A".
 
 use std::{
     cell::RefCell,
