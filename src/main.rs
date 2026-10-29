@@ -2,6 +2,7 @@ mod app;
 mod covers;
 mod details;
 mod mock;
+mod ratings;
 mod sample;
 mod ui;
 

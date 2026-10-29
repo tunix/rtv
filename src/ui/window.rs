@@ -1,6 +1,7 @@
 use adw::prelude::*;
 use gtk::{gio, glib};
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use crate::details::{self, Episode, SeriesInfo};
 use crate::sample::{self, Item, Kind, SeriesMeta};
@@ -1155,13 +1156,7 @@ impl Window {
         match kind {
             Kind::Live => return,
             Kind::Series => self.open_series_details(id, name, item.icon.as_deref(), generation),
-            Kind::Vod => self.open_vod_details(
-                id,
-                name,
-                item.rating.clone(),
-                item.icon.as_deref(),
-                generation,
-            ),
+            Kind::Vod => self.open_vod_details(id, name, item.icon.as_deref(), generation),
         }
         imp.main_view.push(&*imp.detail_page);
     }
@@ -1186,16 +1181,27 @@ impl Window {
         let (header, _) = detail_header(name, ctx.cover.as_deref(), &series_meta_lines(&meta));
         imp.detail_content.append(&header);
 
-        // Rating-source chips sit right below the "künye" (cover +
-        // metadata block).
-        imp.detail_content.append(&source_chips_row(
-            name,
-            meta.rating.as_deref().filter(|r| *r != "0"),
-        ));
+        // Rating-source chips sit right below the künye (cover + metadata
+        // block). The IMDb score arrives from the live ratings lookup;
+        // until then the chip shows a small placeholder.
+        let (chips_row, chips) = source_chips_row(name, true);
+        imp.detail_content.append(&chips_row);
 
-        if let Some(plot) = &meta.plot {
-            imp.detail_content.append(&plot_label(plot));
-        }
+        let win = self.downgrade();
+        let year = meta
+            .release_date
+            .as_deref()
+            .map(|d| &d[..4])
+            .map(str::to_string);
+        crate::ratings::lookup(Kind::Series, name, year.as_deref(), move |ratings| {
+            let Some(win) = win.upgrade() else {
+                return;
+            };
+            if win.imp().details_generation.get() != generation {
+                return;
+            }
+            chips.apply(ratings.as_ref());
+        });
 
         // Trailers get their own section above Seasons: a series can carry
         // several of them (even one per season).
@@ -1269,7 +1275,7 @@ impl Window {
                 .margin_end(12)
                 .build();
             if let Some(cover) = &season.cover {
-                row_box.prepend(&cover_art(Some(cover), 34, 51));
+                row_box.prepend(&cover_art(Some(cover), 40, 60));
             }
             row_box.append(
                 &gtk::Label::builder()
@@ -1339,11 +1345,16 @@ impl Window {
             &series_meta_lines(&ctx.meta),
         );
         imp.episodes_content.append(&header);
-        if let Some(plot) = &ctx.meta.plot {
-            imp.episodes_content.append(&plot_label(plot));
-        }
-        imp.episodes_content
-            .append(&section_title(&format!("Season {season_number}")));
+        // Some breathing room before the season heading, like the Play
+        // pill on the movie page.
+        imp.episodes_content.append(
+            &gtk::Label::builder()
+                .label(format!("Season {season_number}"))
+                .halign(gtk::Align::Start)
+                .margin_top(12)
+                .css_classes(["title-3"])
+                .build(),
+        );
 
         let episodes = info
             .episodes
@@ -1393,30 +1404,34 @@ impl Window {
     /// Movie body, laid out like the series page: cover with the Key:
     /// value details to its right, rating-source chips below the künye,
     /// a prominent Play button, then trailers (when present). The plot
-    /// renders as the last künye line, under Duration.
-    fn open_vod_details(
-        &self,
-        id: i64,
-        name: &str,
-        rating: Option<String>,
-        cover: Option<&str>,
-        generation: u64,
-    ) {
+    /// renders as the last künye line ("Plot"), under Duration.
+    fn open_vod_details(&self, id: i64, name: &str, cover: Option<&str>, generation: u64) {
         let imp = self.imp();
         let (header, info_col) = detail_header(name, cover, &[]);
         imp.detail_content.append(&header);
         info_col.append(&spinner());
 
         // Rating-source chips sit right below the künye, above Play; the
-        // IMDb chip carries the panel's rating.
-        imp.detail_content.append(&source_chips_row(
-            name,
-            rating.as_deref().filter(|r| *r != "0"),
-        ));
+        // ratings lookup refines the IMDb link (and score, once a movie
+        // source exists) in place.
+        let (chips_row, chips) = source_chips_row(name, false);
+        imp.detail_content.append(&chips_row);
+        let win = self.downgrade();
+        crate::ratings::lookup(Kind::Vod, name, None, move |ratings| {
+            let Some(win) = win.upgrade() else {
+                return;
+            };
+            if win.imp().details_generation.get() != generation {
+                return;
+            }
+            chips.apply(ratings.as_ref());
+        });
 
+        // A little distance from the künye/chips block.
         let play = gtk::Button::builder()
             .label("Play")
             .halign(gtk::Align::Center)
+            .margin_top(18)
             .css_classes(["suggested-action", "pill"])
             .build();
         let win = self.downgrade();
@@ -1471,7 +1486,7 @@ impl Window {
             info.cast.map(|v| ("Cast", v)),
             info.director.map(|v| ("Director", v)),
             info.duration.map(|v| ("Duration", format_duration(&v))),
-            info.plot.map(|v| ("Description", v)),
+            info.plot.map(|v| ("Plot", v)),
         ]
         .into_iter()
         .flatten()
@@ -1619,9 +1634,8 @@ fn kv_line(key: &str, value: &str) -> gtk::Label {
         .build()
 }
 
-/// The shared series header lines: Genre, Released, Cast, Director and
-/// episode length. The IMDb rating lives in the source chip below the
-/// header, so it is not repeated here.
+/// The shared series header lines: Genre, Released, Cast, Director,
+/// episode length and Plot — identical structure to the movie künye.
 fn series_meta_lines(meta: &SeriesMeta) -> Vec<Option<(String, String)>> {
     [
         meta.genre.clone().map(|v| ("Genre".to_string(), v)),
@@ -1633,6 +1647,7 @@ fn series_meta_lines(meta: &SeriesMeta) -> Vec<Option<(String, String)>> {
         meta.episode_run_time
             .clone()
             .map(|v| ("Episode length".to_string(), format!("~{v} min"))),
+        meta.plot.clone().map(|v| ("Plot".to_string(), v)),
     ]
     .into_iter()
     .collect()
@@ -1776,6 +1791,9 @@ fn image_card(
         .build();
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&art));
+    // Clip every layer (picture, placeholders, chips) to the rounded
+    // card, so loaded images never poke past the frame corners.
+    overlay.set_overflow(gtk::Overflow::Hidden);
 
     if let Some((icon, pixel)) = placeholder {
         overlay.add_overlay(
@@ -1824,10 +1842,15 @@ fn image_card(
     }
 
     let click = gtk::GestureClick::new();
+    // Capture phase + explicit claim: the click belongs to the preview —
+    // it must not ALSO activate the surrounding list row.
+    click.set_propagation_phase(gtk::PropagationPhase::Capture);
     click.connect_pressed({
         let loaded = loaded.clone();
         let overlay = overlay.clone();
-        move |_, _, _, _| {
+        move |gesture, _, x, y| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            let _ = (x, y);
             if let Some(texture) = loaded.borrow().as_ref() {
                 open_preview(&overlay, texture);
             }
@@ -1931,16 +1954,6 @@ fn spinner() -> gtk::Spinner {
         .build()
 }
 
-fn plot_label(text: &str) -> gtk::Label {
-    gtk::Label::builder()
-        .label(text)
-        .wrap(true)
-        .wrap_mode(gtk::pango::WrapMode::WordChar)
-        .xalign(0.0)
-        .halign(gtk::Align::Start)
-        .build()
-}
-
 fn dim_label(text: &str) -> gtk::Label {
     gtk::Label::builder()
         .label(text)
@@ -1961,36 +1974,90 @@ fn section_title(text: &str) -> gtk::Label {
         .build()
 }
 
+/// The updatable parts of the source chips row: the IMDb chip's score
+/// label and its URL (upgraded to the exact title page once the ratings
+/// lookup resolves the IMDb id).
+struct SourceChips {
+    imdb_score: gtk::Label,
+    imdb_url: Rc<RefCell<String>>,
+}
+
+impl SourceChips {
+    /// Apply a ratings lookup result: fill the IMDb score and/or point
+    /// the IMDb chip at the exact title page. `None` (lookup failed)
+    /// leaves the plain external-link arrow.
+    fn apply(&self, ratings: Option<&crate::ratings::Ratings>) {
+        let Some(ratings) = ratings else {
+            self.imdb_score.set_text("↗");
+            return;
+        };
+        match &ratings.imdb {
+            Some(score) => {
+                self.imdb_score.remove_css_class("dim-label");
+                self.imdb_score.set_text(score);
+            }
+            None => self.imdb_score.set_text("↗"),
+        }
+        if let Some(id) = &ratings.imdb_id {
+            self.imdb_url
+                .replace(format!("https://www.imdb.com/title/{id}/"));
+        }
+    }
+}
+
 /// "Ying-yang" source chips: the left half names the source, the right
-/// half shows its score — or an external-link arrow when the source
-/// carries no rating data. Activating opens the source in the browser.
-/// The panels carry no source-specific ids, so these are title searches.
-fn source_chips_row(title: &str, imdb: Option<&str>) -> gtk::Box {
+/// half shows its score — or an external-link arrow when no score is
+/// (yet) available. Activating opens the source in the browser; the IMDb
+/// chip's score/url are updated in place by the ratings lookup.
+fn source_chips_row(title: &str, loading: bool) -> (gtk::Box, SourceChips) {
     let query = glib::uri_escape_string(title, None::<&str>, false);
     let row = gtk::Box::builder()
         .spacing(6)
         .halign(gtk::Align::Start)
         .build();
-    row.append(&source_chip(
-        "IMDb",
-        imdb,
-        format!("https://www.imdb.com/find/?q={query}"),
-    ));
+
+    let imdb_url = Rc::new(RefCell::new(format!(
+        "https://www.imdb.com/find/?q={query}"
+    )));
+    // While the ratings lookup runs, the score half shows a small
+    // placeholder; it settles into the score or the external-link arrow.
+    let imdb_score = gtk::Label::builder()
+        .label(if loading { "…" } else { "↗" })
+        .css_classes(["dim-label"])
+        .build();
+    row.append(&source_chip("IMDb", imdb_url.clone(), imdb_score.clone()));
+    let rotten_url = format!("https://www.rottentomatoes.com/search?search={query}");
     row.append(&source_chip(
         "Rotten Tomatoes",
-        None,
-        format!("https://www.rottentomatoes.com/search?search={query}"),
+        Rc::new(RefCell::new(rotten_url)),
+        arrow_label(),
     ));
+    let wiki_url = format!("https://en.wikipedia.org/w/index.php?search={query}");
     row.append(&source_chip(
         "Wikipedia",
-        None,
-        format!("https://en.wikipedia.org/w/index.php?search={query}"),
+        Rc::new(RefCell::new(wiki_url)),
+        arrow_label(),
     ));
-    row
+
+    (
+        row,
+        SourceChips {
+            imdb_score,
+            imdb_url,
+        },
+    )
 }
 
-/// One source chip: source name | score (or an arrow when unrated).
-fn source_chip(source: &str, score: Option<&str>, url: String) -> gtk::Button {
+fn arrow_label() -> gtk::Label {
+    gtk::Label::builder()
+        .label("↗")
+        .css_classes(["dim-label"])
+        .build()
+}
+
+/// One source chip: source name | right-half label; the URL is kept in a
+/// RefCell so an upgraded link (exact IMDb title) is used when clicked.
+fn source_chip(source: &str, url: Rc<RefCell<String>>, right: gtk::Label) -> gtk::Button {
     let content = gtk::Box::builder().spacing(8).build();
     content.append(
         &gtk::Label::builder()
@@ -2003,15 +2070,7 @@ fn source_chip(source: &str, score: Option<&str>, url: String) -> gtk::Button {
             .orientation(gtk::Orientation::Vertical)
             .build(),
     );
-    match score {
-        Some(score) => content.append(&gtk::Label::new(Some(score))),
-        None => content.append(
-            &gtk::Label::builder()
-                .label("↗")
-                .css_classes(["dim-label"])
-                .build(),
-        ),
-    }
+    content.append(&right);
     let button = gtk::Button::builder()
         .child(&content)
         .tooltip_text(format!("Open {source}"))
@@ -2021,7 +2080,11 @@ fn source_chip(source: &str, score: Option<&str>, url: String) -> gtk::Button {
         // gtk_uri_launcher_present would be the modern API; show_uri
         // still opens the default browser with zero ceremony.
         #[allow(deprecated)]
-        gtk::show_uri(None::<&gtk::Window>, &url, gtk::gdk::CURRENT_TIME);
+        gtk::show_uri(
+            None::<&gtk::Window>,
+            &url.borrow().clone(),
+            gtk::gdk::CURRENT_TIME,
+        );
     });
     button
 }
@@ -2093,13 +2156,7 @@ fn episode_row(episode: &Episode) -> gtk::ListBoxRow {
             .ellipsize(gtk::pango::EllipsizeMode::End)
             .build(),
     );
-    let mut subtitle = episode.duration.as_deref().map(format_duration);
-    if let Some(container) = &episode.container {
-        subtitle = Some(match subtitle {
-            Some(duration) => format!("{duration} · {container}"),
-            None => container.clone(),
-        });
-    }
+    let subtitle = episode.duration.as_deref().map(format_duration);
     if let Some(subtitle) = subtitle {
         text.append(
             &gtk::Label::builder()
@@ -2165,6 +2222,9 @@ fn card_body(
 
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&art));
+    // Clip every layer (picture, placeholders, chips) to the rounded
+    // card, so loaded images never poke past the frame corners.
+    overlay.set_overflow(gtk::Overflow::Hidden);
     overlay.add_overlay(&placeholder);
     overlay.add_overlay(&picture);
 
