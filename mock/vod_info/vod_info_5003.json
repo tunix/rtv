@@ -1,13 +1,13 @@
 {
   "info": {
     "movie_image": "https://picsum.photos/seed/rtv-vod-big-5003/300/450",
-    "duration_secs": 5820,
-    "duration": "0:01:37:00",
+    "duration_secs": 7260,
+    "duration": "0:02:01:00",
     "plot": "An chess prodigy faces the machine she helped build.",
     "cast": "Ela Yilmaz, Marcus Chen, Priya Nair",
-    "director": "Carmen Ruiz",
-    "genre": "Comedy",
-    "releasedate": "2015-12-05",
-    "rating": "6.9"
+    "director": "Jonas Berg",
+    "genre": "Sci-Fi",
+    "releasedate": "1999-01-01",
+    "rating": "8.3"
   }
 }

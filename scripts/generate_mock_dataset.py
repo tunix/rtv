@@ -72,6 +72,35 @@ write("live_categories.json", live_categories)
 write("live_streams.json", live_items)
 
 # ---------------------------------------------------------------- series
+# Real-world titles so the live ratings lookup (Cinemeta/TVmaze) resolves
+# actual scores in --mock; the year seeds the releaseDate used for
+# title+year matching.
+series_titles = [
+    ("Breaking Bad", 2008, "Crime"),
+    ("Dexter", 2006, "Crime"),
+    ("The Office", 2005, "Comedy"),
+    ("Game of Thrones", 2011, "Drama"),
+    ("Stranger Things", 2016, "Sci-Fi"),
+    ("The Last of Us", 2023, "Drama"),
+    ("Chernobyl", 2019, "Drama"),
+    ("True Detective", 2014, "Crime"),
+    ("Fargo", 2014, "Crime"),
+    ("Better Call Saul", 2015, "Crime"),
+    ("Dark", 2017, "Sci-Fi"),
+    ("The Crown", 2016, "Drama"),
+    ("Mr. Robot", 2015, "Thriller"),
+    ("Peaky Blinders", 2013, "Crime"),
+    ("Sherlock", 2010, "Crime"),
+    ("The Boys", 2019, "Sci-Fi"),
+    ("Severance", 2022, "Sci-Fi"),
+    ("Succession", 2018, "Drama"),
+    ("Fleabag", 2016, "Comedy"),
+    ("The Bear", 2022, "Comedy"),
+    ("Andor", 2022, "Sci-Fi"),
+    ("Fallout", 2024, "Sci-Fi"),
+    ("The Witcher", 2019, "Sci-Fi"),
+    ("Black Mirror", 2011, "Sci-Fi"),
+]
 series_plots = [
     "A detective returns to her hometown and finds every greeting hides a secret.",
     "The crew of a salvage ship stumbles on a wreck nobody wants found.",
@@ -90,12 +119,20 @@ series_cast = [
 ]
 genres = ["Drama", "Thriller", "Mystery", "Comedy", "Sci-Fi", "Crime"]
 
+# Real trailer-like clips that actually play in the app (verified with
+# gst-launch: they reach PLAYING).
+trailer_urls = [
+    "https://media.w3.org/2010/05/bunny/trailer.mp4",
+    "https://media.w3.org/2010/05/bunny/movie.mp4",
+    "https://archive.org/download/ElephantsDream/ed_hd.mp4",
+    "https://media.w3.org/2010/05/video/movie_300.mp4",
+]
+
 series_categories = [{"category_id": "1", "category_name": "Scripted"},
                      {"category_id": "2", "category_name": "Documentary Series"}]
 series_items = []
-for i in range(24):
+for i, (name, year, genre) in enumerate(series_titles):
     s_id = 3000 + i
-    name = f"Mock Series #{i + 1:02d}"
     series_items.append({
         "series_id": s_id,
         "num": i + 1,
@@ -105,10 +142,11 @@ for i in range(24):
         "plot": random.choice(series_plots),
         "cast": random.choice(series_cast),
         "director": random.choice(["Aylin Demir", "Jonas Berg", "Carmen Ruiz", "Ken Watanabe"]),
-        "genre": random.choice(genres),
+        "genre": genre,
         "rating": f"{random.uniform(5.6, 9.4):.1f}",
-        "releaseDate": f"{random.randint(2012, 2025)}-{random.randint(1, 12):02d}-01",
-        "youtube_trailer": f"https://www.youtube.com/watch?v=mocktrailer{i + 1:02d}",
+        "releaseDate": f"{year}-{random.randint(1, 12):02d}-01",
+        # Real, playable clips: trailer rows actually play in the app.
+        "youtube_trailer": trailer_urls[i % len(trailer_urls)],
         "episode_run_time": str(random.choice([28, 32, 42, 45, 50])),
         "backdrop_path": [cover(f"rtv-series-bd-{s_id}", 640, 360)],
     })
@@ -151,6 +189,34 @@ for s in series_items:
     write(f"series_info/series_info_{s_id}.json", {"seasons": seasons, "episodes": episodes})
 
 # ---------------------------------------------------------------- vod
+vod_titles = [
+    ("Inception", 2010, "Sci-Fi"),
+    ("The Godfather", 1972, "Drama"),
+    ("Pulp Fiction", 1994, "Crime"),
+    ("The Matrix", 1999, "Sci-Fi"),
+    ("Interstellar", 2014, "Sci-Fi"),
+    ("Parasite", 2019, "Thriller"),
+    ("Whiplash", 2014, "Drama"),
+    ("Gladiator", 2000, "Drama"),
+    ("The Dark Knight", 2008, "Crime"),
+    ("Arrival", 2016, "Sci-Fi"),
+    ("Dune", 2021, "Sci-Fi"),
+    ("Oppenheimer", 2023, "Drama"),
+    ("Spider-Man: Into the Spider-Verse", 2018, "Sci-Fi"),
+    ("Mad Max: Fury Road", 2015, "Thriller"),
+    ("Blade Runner 2049", 2017, "Sci-Fi"),
+    ("The Grand Budapest Hotel", 2014, "Comedy"),
+    ("La La Land", 2016, "Comedy"),
+    ("Coco", 2017, "Comedy"),
+    ("Up", 2009, "Comedy"),
+    ("Toy Story", 1995, "Comedy"),
+    ("Alien", 1979, "Sci-Fi"),
+    ("Back to the Future", 1985, "Sci-Fi"),
+    ("Forrest Gump", 1994, "Drama"),
+    ("Nightcrawler", 2014, "Thriller"),
+    ("The Shawshank Redemption", 1994, "Drama"),
+    ("Spirited Away", 2001, "Sci-Fi"),
+]
 vod_plots = [
     "A night-shift baker witnesses a robbery and becomes the only credible witness.",
     "Two strangers swap suitcases at a station and inherit each other's enemies.",
@@ -162,12 +228,12 @@ vod_plots = [
 vod_categories = [{"category_id": "1", "category_name": "Feature Films"},
                   {"category_id": "2", "category_name": "Independent"}]
 vod_items = []
-for i in range(26):
+for i, (name, year, genre) in enumerate(vod_titles):
     v_id = 5000 + i
     vod_items.append({
         "stream_id": v_id,
         "num": i + 1,
-        "name": f"Mock Movie #{i + 1:02d}",
+        "name": name,
         "category_id": "1" if i % 3 else "2",
         "stream_icon": cover(f"rtv-vod-{v_id}"),
         "rating": f"{random.uniform(5.0, 9.2):.1f}",
@@ -178,19 +244,23 @@ write("vod_streams.json", vod_items)
 for v in vod_items:
     v_id = v["stream_id"]
     mins = random.randint(85, 148)
-    write(f"vod_info/vod_info_{v_id}.json", {
-        "info": {
-            "movie_image": cover(f"rtv-vod-big-{v_id}"),
-            "duration_secs": mins * 60,
-            "duration": f"0:{mins // 60:02d}:{mins % 60:02d}:00",
-            "plot": random.choice(vod_plots),
-            "cast": random.choice(series_cast),
-            "director": random.choice(["Aylin Demir", "Jonas Berg", "Carmen Ruiz"]),
-            "genre": random.choice(genres),
-            "releasedate": f"{random.randint(2015, 2026)}-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}",
-            "rating": v["rating"],
-        }
-    })
+    info = {
+        "movie_image": cover(f"rtv-vod-big-{v_id}"),
+        "duration_secs": mins * 60,
+        "duration": f"0:{mins // 60:02d}:{mins % 60:02d}:00",
+        "plot": random.choice(vod_plots),
+        "cast": random.choice(series_cast),
+        "director": random.choice(["Aylin Demir", "Jonas Berg", "Carmen Ruiz"]),
+        "genre": vod_titles[v_id - 5000][2],
+        "releasedate": f"{random.randint(2015, 2026)}-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}",
+        "rating": v["rating"],
+    }
+    # Keep the release year aligned with the real title so the ratings
+    # lookup matches on title+year.
+    info["releasedate"] = f"{vod_titles[v_id - 5000][1]}-01-01"
+    if v_id % 2 == 0:
+        info["youtube_trailer"] = trailer_urls[(v_id // 2) % len(trailer_urls)]
+    write(f"vod_info/vod_info_{v_id}.json", {"info": info})
 
 # ---------------------------------------------------------------- user_info
 # Shape-only placeholder for the real-mode details layer; --mock never reads

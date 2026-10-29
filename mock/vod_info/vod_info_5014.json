@@ -1,13 +1,14 @@
 {
   "info": {
     "movie_image": "https://picsum.photos/seed/rtv-vod-big-5014/300/450",
-    "duration_secs": 7020,
-    "duration": "0:01:57:00",
-    "plot": "An chess prodigy faces the machine she helped build.",
-    "cast": "Hana Sato, Diego Alvarez, Ruth Okonkwo",
-    "director": "Aylin Demir",
-    "genre": "Comedy",
-    "releasedate": "2022-02-08",
-    "rating": "6.1"
+    "duration_secs": 6060,
+    "duration": "0:01:41:00",
+    "plot": "The last lighthouse keeper records a shipwreck that officially never happened.",
+    "cast": "Marek Nowak, Sofia Rossi, Jin Park",
+    "director": "Carmen Ruiz",
+    "genre": "Sci-Fi",
+    "releasedate": "2017-01-01",
+    "rating": "9.0",
+    "youtube_trailer": "https://media.w3.org/2010/05/video/movie_300.mp4"
   }
 }

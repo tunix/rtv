@@ -2,20 +2,22 @@
 //! are resolved from open, keyless metadata sources on demand — libsoup3
 //! on the GLib main loop (never blocking, never crashing), an in-memory
 //! cache plus a disk cache with a freshness window, graceful failure.
+//! (Mock mode fetches artwork the same way, so lookups run there too;
+//! offline they fail gracefully.)
 //!
-//! Providers (all keyless, all speaking JSON):
-//! - **IMDb suggestion API** (`v2.sg.media-imdb.com`): resolves a title
-//!   to its IMDb id (`tt…`) — which also upgrades the IMDb chip's link
-//!   from a title search to the exact title page.
-//! - **TVmaze search** (series): carries the IMDb-sourced average rating.
+//! Provider chain (all keyless, all speaking JSON):
+//! - **Cinemeta** (Stremio's metadata addon; movies AND series): the
+//!   catalog search resolves a title to its IMDb id, and the meta
+//!   endpoint carries `imdbRating` — the score for both kinds.
+//! - **TVmaze search** (series fallback when Cinemeta misses): carries
+//!   the IMDb-sourced average rating.
 //!
 //! Rotten Tomatoes has no keyless JSON source (its search results are
 //! rendered client-side); its score stays reserved for a proper metadata
 //! provider (OMDb/TMDB with a user-supplied key) in the backend phase —
-//! the ratings struct and chip plumbing are already shaped for it.
-//!
-//! Mock mode stays hermetic: no network request is made, lookups simply
-//! report "nothing found".
+//! the ratings struct and chip plumbing are already shaped for it. When
+//! no source provides a score, the UI falls back to the panel's own
+//! rating and finally to "N/A".
 
 use std::{
     cell::RefCell,
@@ -35,7 +37,7 @@ use soup::prelude::*;
 use crate::sample::Kind;
 
 /// Fetched ratings for one title. Fields stay `None` when no source
-/// provides them (the chips degrade to a plain external-link arrow).
+/// provides them (the UI then falls back to the panel rating / "N/A").
 #[derive(Debug, Clone, Default)]
 pub struct Ratings {
     /// IMDb score ("8.4"), when a source provides it.
@@ -111,12 +113,9 @@ pub fn lookup(
         done(Some(ratings));
         return;
     }
-    // Mock mode stays hermetic: no network request at all.
-    if crate::mock::enabled() {
-        done(None);
-        return;
-    }
 
+    // Mock mode fetches artwork over the network already (covers), so
+    // live lookups run there too; offline they fail gracefully.
     fetch_chain(
         kind,
         name.to_string(),
@@ -155,8 +154,9 @@ fn write_cache(key: &str, ratings: &Ratings) {
     let _ = fs::write(cache_dir().join(key), entry.to_string());
 }
 
-/// The provider chain: IMDb suggestion first (id resolution for every
-/// kind), then TVmaze for the series score. `done` runs exactly once.
+/// The provider chain: Cinemeta search → Cinemeta meta (score for both
+/// kinds); TVmaze as the series fallback when Cinemeta misses. `done`
+/// runs exactly once.
 fn fetch_chain(
     kind: Kind,
     name: String,
@@ -164,36 +164,38 @@ fn fetch_chain(
     done: impl FnOnce(Option<Ratings>) + 'static,
 ) {
     let ratings: Rc<RefCell<Ratings>> = Rc::new(RefCell::new(Ratings::default()));
-    let done = RefCell::new(Some(Box::new(done) as DoneCallback));
+    let done: Rc<RefCell<Option<DoneCallback>>> = Rc::new(RefCell::new(Some(Box::new(done))));
 
-    // IMDb's autocomplete endpoint is path-keyed by the first character.
-    let trimmed = name.trim();
-    let initial = trimmed
-        .chars()
-        .next()
-        .map(|c| c.to_lowercase().next().unwrap_or('_'))
-        .unwrap_or('_');
-    let initial = if initial.is_ascii_alphanumeric() {
-        initial.to_string()
-    } else {
-        "_".to_string()
+    let catalog_type = match kind {
+        Kind::Vod => "movie",
+        _ => "series",
     };
-    let query = glib::uri_escape_string(trimmed, None::<&str>, false).to_string();
-    let suggestion_url = format!("https://v2.sg.media-imdb.com/suggestion/{initial}/{query}.json");
+    let query = glib::uri_escape_string(name.trim(), None::<&str>, false).to_string();
+    let search_url =
+        format!("https://v3-cinemeta.strem.io/catalog/{catalog_type}/top/search={query}.json");
 
-    get_json(&suggestion_url, move |value| {
-        if let Some(value) = &value {
-            ratings.borrow_mut().imdb_id = pick_imdb_entry(value, &name, &year);
-        }
-        if kind != Kind::Series {
-            finish(&done, &ratings);
+    get_json(&search_url, move |value| {
+        let picked = value.as_ref().and_then(|v| pick_cinemeta(v, &name, &year));
+        let Some((imdb_id, meta_type)) = picked else {
+            // Cinemeta missed: TVmaze still covers series.
+            if kind == Kind::Series {
+                let tvmaze_url = format!("https://api.tvmaze.com/search/shows?q={query}");
+                get_json(&tvmaze_url, move |value| {
+                    if let Some(value) = &value {
+                        fill_tvmaze(value, &name, &year, &mut ratings.borrow_mut());
+                    }
+                    finish(&done, &ratings);
+                });
+            } else {
+                finish(&done, &ratings);
+            }
             return;
-        }
-        // Series: TVmaze carries the IMDb-sourced average rating.
-        let tvmaze_url = format!("https://api.tvmaze.com/search/shows?q={query}");
-        get_json(&tvmaze_url, move |value| {
+        };
+        ratings.borrow_mut().imdb_id = Some(imdb_id.clone());
+        let meta_url = format!("https://v3-cinemeta.strem.io/meta/{meta_type}/{imdb_id}.json");
+        get_json(&meta_url, move |value| {
             if let Some(value) = &value {
-                fill_tvmaze(value, &name, &year, &mut ratings.borrow_mut());
+                ratings.borrow_mut().imdb = cinemeta_rating(value);
             }
             finish(&done, &ratings);
         });
@@ -201,46 +203,65 @@ fn fetch_chain(
 }
 
 /// Consume the pending callback with the (possibly partial) result.
-fn finish(done: &RefCell<Option<DoneCallback>>, ratings: &Rc<RefCell<Ratings>>) {
+fn finish(done: &Rc<RefCell<Option<DoneCallback>>>, ratings: &Rc<RefCell<Ratings>>) {
     let snapshot = ratings.borrow().clone();
     if let Some(done) = done.borrow_mut().take() {
         done(Some(snapshot));
     }
 }
 
-/// Pick the suggestion entry matching the title (and year, when known):
-/// an exact title match with the right year wins, then any exact title
-/// match, then a title prefix match.
-fn pick_imdb_entry(value: &Value, name: &str, year: &Option<String>) -> Option<String> {
-    let entries = value.get("d")?.as_array()?;
+/// The Cinemeta meta endpoint's `meta.imdbRating` ("8.8"), when sane.
+fn cinemeta_rating(value: &Value) -> Option<String> {
+    let rating = value
+        .get("meta")
+        .and_then(|m| m.get("imdbRating"))
+        .and_then(Value::as_str)?;
+    let score = rating.parse::<f64>().ok()?;
+    ((0.0..=10.0).contains(&score)).then(|| format!("{score:.1}"))
+}
+
+/// Pick the Cinemeta catalog entry matching the title (and year, when
+/// known): exact title + year, then any exact title match, then a title
+/// prefix match. Returns (imdb_id, meta_type).
+fn pick_cinemeta(value: &Value, name: &str, year: &Option<String>) -> Option<(String, String)> {
+    let metas = value.get("metas")?.as_array()?;
     let wanted = name.trim().to_lowercase();
     let year_num = year.as_deref().and_then(year_prefix);
     let mut exact = None;
     let mut prefix = None;
-    for entry in entries {
-        let Some(id) = entry
-            .get("id")
+    for meta in metas {
+        let Some(id) = meta
+            .get("imdb_id")
+            .or_else(|| meta.get("id"))
             .and_then(Value::as_str)
             .filter(|id| id.starts_with("tt"))
         else {
             continue;
         };
-        let Some(title) = entry.get("l").and_then(Value::as_str) else {
+        let Some(title) = meta.get("name").and_then(Value::as_str) else {
             continue;
         };
+        let meta_type = meta
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("movie")
+            .to_string();
         let title = title.to_lowercase();
-        let entry_year = entry.get("y").and_then(Value::as_i64);
-        let year_match = match (year_num, entry_year) {
+        let release_year = meta
+            .get("releaseInfo")
+            .and_then(Value::as_str)
+            .and_then(year_prefix);
+        let year_match = match (year_num, release_year) {
             (Some(wanted), Some(actual)) => actual == wanted,
             _ => true,
         };
         if title == wanted {
             if year_match {
-                return Some(id.to_string());
+                return Some((id.to_string(), meta_type));
             }
-            exact = exact.or_else(|| Some(id.to_string()));
+            exact = exact.or_else(|| Some((id.to_string(), meta_type)));
         } else if title.starts_with(&wanted) {
-            prefix = prefix.or_else(|| Some(id.to_string()));
+            prefix = prefix.or_else(|| Some((id.to_string(), meta_type)));
         }
     }
     exact.or(prefix)
@@ -299,9 +320,9 @@ fn fill_tvmaze(value: &Value, name: &str, year: &Option<String>, ratings: &mut R
     }
 }
 
-/// "2015-09-01" -> 2015.
+/// "2015-09-01" / "2008–2013" (en dash) -> 2008.
 fn year_prefix(year: &str) -> Option<i64> {
-    year.split('-').next()?.parse().ok()
+    year.split(['-', '–']).next()?.trim().parse().ok()
 }
 
 /// Lenient string field: `None` for missing, null and empty values.
@@ -348,27 +369,38 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn imdb_suggestion_prefers_exact_title_and_year() {
+    fn cinemeta_picks_title_and_type() {
         let value = json!({
-            "d": [
-                {"id": "tt999", "l": "1883: The Sequel", "y": 2025, "qid": "tvSeries"},
-                {"id": "tt111", "l": "1883", "y": 2021, "qid": "tvSeries"},
-                {"id": "tt222", "l": "1883", "y": 2019, "qid": "feature"}
+            "metas": [
+                {"id": "tt999", "imdb_id": "tt999", "type": "series",
+                 "name": "1883: The Sequel", "releaseInfo": "2025"},
+                {"id": "tt111", "imdb_id": "tt111", "type": "series",
+                 "name": "1883", "releaseInfo": "2021–2022"},
+                {"id": "tt222", "imdb_id": "tt222", "type": "movie",
+                 "name": "1883", "releaseInfo": "2019"}
             ]
         });
-        // Exact title + matching year beats everything.
+        // Exact title + matching year (en-dash ranges parse).
         let year = Some("2021-06-01".to_string());
         assert_eq!(
-            pick_imdb_entry(&value, "1883", &year).as_deref(),
-            Some("tt111")
+            pick_cinemeta(&value, "1883", &year),
+            Some(("tt111".to_string(), "series".to_string()))
         );
         // No year: the exact title match still wins over a prefix match.
         assert_eq!(
-            pick_imdb_entry(&value, "1883", &None).as_deref(),
-            Some("tt111")
+            pick_cinemeta(&value, "1883", &None),
+            Some(("tt111".to_string(), "series".to_string()))
         );
         // Unrelated title: no match.
-        assert_eq!(pick_imdb_entry(&value, "yellowstone", &None), None);
+        assert_eq!(pick_cinemeta(&value, "yellowstone", &None), None);
+    }
+
+    #[test]
+    fn cinemeta_meta_rating_is_sane() {
+        let meta = json!({"meta": {"name": "Inception", "imdbRating": "8.8"}});
+        assert_eq!(cinemeta_rating(&meta).as_deref(), Some("8.8"));
+        let junk = json!({"meta": {"imdbRating": "null"}});
+        assert_eq!(cinemeta_rating(&junk), None);
     }
 
     #[test]

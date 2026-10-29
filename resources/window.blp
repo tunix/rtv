@@ -245,6 +245,12 @@ template $RtvWindow : Adw.ApplicationWindow {
               };
 
               [overlay]
+              Gtk.Picture video_surface {
+                content-fit: cover;
+                visible: false;
+              }
+
+              [overlay]
               Gtk.Image app_watermark {
                 icon-name: "io.github.tunix.rtv";
                 pixel-size: 240;

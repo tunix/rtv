@@ -1,13 +1,14 @@
 {
   "info": {
     "movie_image": "https://picsum.photos/seed/rtv-vod-big-5008/300/450",
-    "duration_secs": 5820,
-    "duration": "0:01:37:00",
-    "plot": "An chess prodigy faces the machine she helped build.",
-    "cast": "Tomas Weber, Aisha Bello, Luc Moreau",
-    "director": "Carmen Ruiz",
-    "genre": "Mystery",
-    "releasedate": "2015-01-11",
-    "rating": "5.6"
+    "duration_secs": 8820,
+    "duration": "0:02:27:00",
+    "plot": "A night-shift baker witnesses a robbery and becomes the only credible witness.",
+    "cast": "Marek Nowak, Sofia Rossi, Jin Park",
+    "director": "Jonas Berg",
+    "genre": "Crime",
+    "releasedate": "2008-01-01",
+    "rating": "8.6",
+    "youtube_trailer": "https://media.w3.org/2010/05/bunny/trailer.mp4"
   }
 }

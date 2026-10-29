@@ -3,6 +3,8 @@ use gtk::{gio, glib};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use gstreamer::prelude::*;
+
 use crate::details::{self, Episode, SeriesInfo};
 use crate::sample::{self, Item, Kind, SeriesMeta};
 
@@ -100,6 +102,8 @@ mod imp {
         #[template_child]
         pub app_watermark: TemplateChild<gtk::Image>,
         #[template_child]
+        pub video_surface: TemplateChild<gtk::Picture>,
+        #[template_child]
         pub controls_revealer: TemplateChild<gtk::Revealer>,
         #[template_child]
         pub play_button_small: TemplateChild<gtk::Button>,
@@ -149,6 +153,12 @@ mod imp {
         pub muted: Cell<bool>,
         pub has_source: Cell<bool>,
         pub on_player: Cell<bool>,
+        /// Whether the current playback target is live TV (drives the
+        /// LIVE badge).
+        pub is_live: Cell<bool>,
+        /// Active GStreamer pipeline for real playback (trailers); None
+        /// means the demo player is on screen.
+        pub pipeline: RefCell<Option<gstreamer::Element>>,
         pub selected_category: Cell<i32>,
         pub last_pointer: Cell<(f64, f64)>,
         pub favorites: RefCell<Vec<FavKey>>,
@@ -212,6 +222,9 @@ impl Window {
             .build();
 
         let _ = window.imp().catalog.set(sample::Catalog::load());
+        // Alt-tab shows the toplevel title; with a header bar title
+        // widget GTK would otherwise fall back to the app id.
+        window.set_title(Some("RTV"));
         window.setup_actions();
         window.setup_browse();
         window.imp().selected_category.set(-1);
@@ -280,6 +293,7 @@ impl Window {
             imp.has_source.set(false);
             imp.favorites.borrow_mut().clear();
             *imp.current.borrow_mut() = None;
+            win.stop_pipeline();
             win.rebuild_favorites();
             imp.main_view.pop_to_page(&*imp.welcome_page);
         });
@@ -305,7 +319,7 @@ impl Window {
         seek_back.connect_activate(move |_, _| {
             let Some(win) = win.upgrade() else { return };
             if win.imp().on_player.get() {
-                win.toast("Seek back 10s (mock)");
+                win.seek_relative(-10);
             }
         });
         self.add_action(&seek_back);
@@ -315,7 +329,7 @@ impl Window {
         seek_forward.connect_activate(move |_, _| {
             let Some(win) = win.upgrade() else { return };
             if win.imp().on_player.get() {
-                win.toast("Seek forward 10s (mock)");
+                win.seek_relative(10);
             }
         });
         self.add_action(&seek_forward);
@@ -479,7 +493,8 @@ impl Window {
         });
 
         // When the player or the episodes page pops off, their state is
-        // gone; the episodes page drops its (cover-fetching) children.
+        // gone; the player tears down any real pipeline, the episodes
+        // page drops its (cover-fetching) children.
         let win = self.downgrade();
         imp.main_view.connect_popped(move |_, popped_page| {
             let Some(win) = win.upgrade() else { return };
@@ -487,6 +502,7 @@ impl Window {
             if popped_page == &*i.player_page {
                 i.on_player.set(false);
                 win.cancel_hide();
+                win.stop_pipeline();
             }
             if popped_page == &*i.episodes_page {
                 while let Some(child) = i.episodes_content.first_child() {
@@ -505,19 +521,28 @@ impl Window {
         let win = self.downgrade();
         imp.seek_back.connect_clicked(move |_| {
             if let Some(win) = win.upgrade() {
-                win.toast("Seek back 10s (mock)");
+                win.seek_relative(-10);
             }
         });
         let win = self.downgrade();
         imp.seek_forward.connect_clicked(move |_| {
             if let Some(win) = win.upgrade() {
-                win.toast("Seek forward 10s (mock)");
+                win.seek_relative(10);
             }
         });
         let win = self.downgrade();
         imp.mute_button.connect_clicked(move |_| {
             if let Some(win) = win.upgrade() {
                 win.toggle_mute();
+            }
+        });
+        // Real pipelines take the volume directly from the slider.
+        let win = self.downgrade();
+        imp.volume_scale.connect_value_changed(move |scale| {
+            if let Some(win) = win.upgrade() {
+                if let Some(pipeline) = win.imp().pipeline.borrow().as_ref() {
+                    pipeline.set_property("volume", scale.value());
+                }
             }
         });
         let win = self.downgrade();
@@ -601,7 +626,7 @@ impl Window {
             });
             i.player_headerbar.set_visible(!fullscreen);
             i.content_info_row.set_visible(!fullscreen);
-            i.live_badge.set_visible(!fullscreen);
+            i.live_badge.set_visible(!fullscreen && i.is_live.get());
             let margin = if fullscreen { 0 } else { 12 };
             i.player_content.set_margin_start(margin);
             i.player_content.set_margin_end(margin);
@@ -1120,9 +1145,188 @@ impl Window {
         imp.content_status.set_label(status);
         imp.playing.set(false);
         self.set_play_icon(false);
+        // The LIVE badge is for live TV only.
+        imp.is_live.set(kind == Kind::Live);
+        imp.live_badge.set_visible(kind == Kind::Live);
         set_heart_active(&imp.player_heart, self.is_fav(kind, id));
         imp.on_player.set(true);
         imp.main_view.push(&*imp.player_page);
+        self.show_controls();
+    }
+
+    /// Trailers are the first real-playback step: playable video URLs run
+    /// through GStreamer inside the player page; YouTube links still need
+    /// a video backend and keep the demo player.
+    fn play_trailer(&self, kind: Kind, id: i64, title: &str, url: Option<String>) {
+        self.play_with_status(kind, id, title, "Trailer");
+        let Some(url) = url else { return };
+        if url.contains("youtube.com") || url.contains("youtu.be") {
+            self.toast("YouTube trailer playback arrives with the video backend — the demo player shows for now");
+            return;
+        }
+        if self.start_playback(&url) {
+            self.imp().playing.set(true);
+            self.set_play_icon(true);
+        } else {
+            self.toast("Real playback is unavailable here — the demo player shows instead");
+        }
+    }
+
+    /// Start real playback for `uri` with GStreamer's playbin, rendering
+    /// into the player page via the GTK4 paintable sink when available.
+    /// Returns whether real playback actually started.
+    fn start_playback(&self, uri: &str) -> bool {
+        let imp = self.imp();
+        self.stop_pipeline();
+
+        if gstreamer::init().is_err() {
+            eprintln!("RTV_PLAYBACK: gst init failed");
+            return false;
+        }
+        let Ok(playbin) = gstreamer::ElementFactory::make("playbin").build() else {
+            eprintln!("RTV_PLAYBACK: playbin missing");
+            return false;
+        };
+        let mut video = false;
+        // The GTK4 paintable sink renders into our own page; without it
+        // (older runtimes, headless GL) the audio still plays while the
+        // demo surface stays up.
+        if let Ok(sink) = gstreamer::ElementFactory::make("gtk4paintablesink").build() {
+            let paintable = sink.property::<Option<gtk::gdk::Paintable>>("paintable");
+            if let Some(paintable) = paintable {
+                imp.video_surface.set_paintable(Some(&paintable));
+                video = true;
+                playbin.set_property("video-sink", &sink);
+            }
+        }
+        if !video {
+            if let Ok(fake) = gstreamer::ElementFactory::make("fakesink").build() {
+                playbin.set_property("video-sink", &fake);
+            }
+        }
+        playbin.set_property("uri", uri);
+        playbin.set_property("volume", imp.volume_scale.value());
+        playbin.set_property("mute", imp.muted.get());
+
+        let playing = playbin.set_state(gstreamer::State::Playing).is_ok();
+        if !playing {
+            let _ = playbin.set_state(gstreamer::State::Null);
+            return false;
+        }
+
+        // Bus events (EOS, errors) are drained on the main loop; the
+        // poller stops itself once the pipeline is torn down. A failing
+        // video sink (headless GL, old runtimes) is retried once without
+        // it — audio keeps playing on the demo surface.
+        if playbin.bus().is_some() {
+            let win = self.downgrade();
+            let retried = Rc::new(std::cell::Cell::new(false));
+            glib::timeout_add_local(std::time::Duration::from_millis(300), move || {
+                let Some(win) = win.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                let Some(pipeline) = win.imp().pipeline.borrow().as_ref().cloned() else {
+                    return glib::ControlFlow::Break;
+                };
+                let Some(bus) = pipeline.bus() else {
+                    return glib::ControlFlow::Break;
+                };
+                let mut stop = false;
+                while let Some(message) = bus.timed_pop(gstreamer::ClockTime::from_seconds(0)) {
+                    match message.view() {
+                        gstreamer::MessageView::Eos(..) => stop = true,
+                        gstreamer::MessageView::Error(err) => {
+                            let _ = err;
+                            if retried.get() {
+                                win.toast("Playback failed — returning to the demo player");
+                                stop = true;
+                            } else {
+                                retried.set(true);
+                                let _ = pipeline.set_state(gstreamer::State::Null);
+                                if let Ok(fake) =
+                                    gstreamer::ElementFactory::make("fakesink").build()
+                                {
+                                    pipeline.set_property("video-sink", &fake);
+                                }
+                                let i = win.imp();
+                                i.video_surface.set_paintable(None::<&gtk::gdk::Paintable>);
+                                i.video_surface.set_visible(false);
+                                i.app_watermark.set_visible(true);
+                                if pipeline.set_state(gstreamer::State::Playing).is_ok() {
+                                    win.toast("Video sink unavailable — playing audio only");
+                                    continue;
+                                }
+                                stop = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if stop {
+                    win.stop_pipeline();
+                    glib::ControlFlow::Break
+                } else {
+                    glib::ControlFlow::Continue
+                }
+            });
+        }
+
+        imp.pipeline.replace(Some(playbin));
+        imp.video_surface.set_visible(video);
+        imp.app_watermark.set_visible(!video);
+        video
+    }
+
+    /// Tear down any active pipeline and return the player to the demo
+    /// surface. Safe to call when nothing is playing.
+    fn stop_pipeline(&self) {
+        let imp = self.imp();
+        if let Some(pipeline) = imp.pipeline.take() {
+            let _ = pipeline.set_state(gstreamer::State::Null);
+            if let Some(bus) = pipeline.bus() {
+                bus.remove_signal_watch();
+            }
+        }
+        imp.video_surface
+            .set_paintable(None::<&gtk::gdk::Paintable>);
+        imp.video_surface.set_visible(false);
+        imp.app_watermark.set_visible(true);
+        if imp.playing.get() {
+            imp.playing.set(false);
+            self.set_play_icon(false);
+        }
+    }
+
+    /// Seek the real pipeline by `delta` seconds; a no-op toast on the
+    /// demo player.
+    fn seek_relative(&self, delta: i64) {
+        if self.imp().pipeline.borrow().is_none() {
+            self.toast("Seek 10s (demo)");
+            return;
+        }
+        let pipeline = self.imp().pipeline.borrow().as_ref().cloned();
+        let Some(pipeline) = pipeline else {
+            return;
+        };
+        let position = pipeline.query_position::<gstreamer::ClockTime>();
+        let duration = pipeline.query_duration::<gstreamer::ClockTime>();
+        let (Some(position), Some(duration)) = (position, duration) else {
+            self.toast("Seeking is not available for this stream");
+            return;
+        };
+        let target = if delta >= 0 {
+            (position + gstreamer::ClockTime::from_seconds(delta as u64)).min(duration)
+        } else {
+            position.saturating_sub(gstreamer::ClockTime::from_seconds(delta.unsigned_abs()))
+        };
+        let _ = pipeline.seek(
+            1.0,
+            gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::KEY_UNIT,
+            gstreamer::SeekType::Set,
+            target,
+            gstreamer::SeekType::Set,
+            duration,
+        );
         self.show_controls();
     }
 
@@ -1156,7 +1360,13 @@ impl Window {
         match kind {
             Kind::Live => return,
             Kind::Series => self.open_series_details(id, name, item.icon.as_deref(), generation),
-            Kind::Vod => self.open_vod_details(id, name, item.icon.as_deref(), generation),
+            Kind::Vod => self.open_vod_details(
+                id,
+                name,
+                item.rating.clone(),
+                item.icon.as_deref(),
+                generation,
+            ),
         }
         imp.main_view.push(&*imp.detail_page);
     }
@@ -1184,10 +1394,11 @@ impl Window {
         // Rating-source chips sit right below the künye (cover + metadata
         // block). The IMDb score arrives from the live ratings lookup;
         // until then the chip shows a small placeholder.
-        let (chips_row, chips) = source_chips_row(name, true);
+        let (chips_row, chips) = source_chips_row(name);
         imp.detail_content.append(&chips_row);
 
         let win = self.downgrade();
+        let panel_rating = meta.rating.clone().filter(|r| r != "0");
         let year = meta
             .release_date
             .as_deref()
@@ -1200,7 +1411,7 @@ impl Window {
             if win.imp().details_generation.get() != generation {
                 return;
             }
-            chips.apply(ratings.as_ref());
+            chips.apply(ratings.as_ref(), panel_rating.as_deref());
         });
 
         // Trailers get their own section above Seasons: a series can carry
@@ -1405,18 +1616,26 @@ impl Window {
     /// value details to its right, rating-source chips below the künye,
     /// a prominent Play button, then trailers (when present). The plot
     /// renders as the last künye line ("Plot"), under Duration.
-    fn open_vod_details(&self, id: i64, name: &str, cover: Option<&str>, generation: u64) {
+    fn open_vod_details(
+        &self,
+        id: i64,
+        name: &str,
+        panel_rating: Option<String>,
+        cover: Option<&str>,
+        generation: u64,
+    ) {
         let imp = self.imp();
         let (header, info_col) = detail_header(name, cover, &[]);
         imp.detail_content.append(&header);
         info_col.append(&spinner());
 
         // Rating-source chips sit right below the künye, above Play; the
-        // ratings lookup refines the IMDb link (and score, once a movie
-        // source exists) in place.
-        let (chips_row, chips) = source_chips_row(name, false);
+        // ratings lookup refines the IMDb link and score in place, with
+        // the panel's rating as the offline fallback.
+        let (chips_row, chips) = source_chips_row(name);
         imp.detail_content.append(&chips_row);
         let win = self.downgrade();
+        let panel_rating = panel_rating.filter(|r| r != "0");
         crate::ratings::lookup(Kind::Vod, name, None, move |ratings| {
             let Some(win) = win.upgrade() else {
                 return;
@@ -1424,7 +1643,7 @@ impl Window {
             if win.imp().details_generation.get() != generation {
                 return;
             }
-            chips.apply(ratings.as_ref());
+            chips.apply(ratings.as_ref(), panel_rating.as_deref());
         });
 
         // A little distance from the künye/chips block.
@@ -1503,11 +1722,25 @@ impl Window {
 
     fn toggle_playing(&self) {
         let imp = self.imp();
+        // Real pipeline: pause/resume the stream.
+        if let Some(pipeline) = imp.pipeline.borrow().as_ref() {
+            let target = if imp.playing.get() {
+                gstreamer::State::Paused
+            } else {
+                gstreamer::State::Playing
+            };
+            let _ = pipeline.set_state(target);
+            imp.playing.set(!imp.playing.get());
+            self.set_play_icon(imp.playing.get());
+            self.show_controls();
+            return;
+        }
+        // Demo player (no real stream attached).
         imp.playing.set(!imp.playing.get());
         self.set_play_icon(imp.playing.get());
         let status = imp.current_status.borrow().clone();
         imp.content_status.set_label(if imp.playing.get() {
-            "Playing (mock)"
+            "Playing (demo)"
         } else {
             &status
         });
@@ -1538,7 +1771,7 @@ impl Window {
         imp.controls_generation.set(generation);
         imp.controls_revealer.set_reveal_child(true);
         if self.is_fullscreen() {
-            imp.live_badge.set_visible(true);
+            imp.live_badge.set_visible(imp.is_live.get());
         }
         if imp.playing.get() && imp.on_player.get() {
             let win = self.downgrade();
@@ -1572,6 +1805,9 @@ impl Window {
         } else {
             "audio-volume-high-symbolic"
         });
+        if let Some(pipeline) = imp.pipeline.borrow().as_ref() {
+            pipeline.set_property("mute", imp.muted.get());
+        }
     }
 
     fn toggle_fullscreen(&self) {
@@ -1677,7 +1913,7 @@ fn trailers_section(
         .activate_on_single_click(true)
         .css_classes(["boxed-list"])
         .build();
-    let mut titles = Vec::new();
+    let mut entries: Vec<(String, String)> = Vec::new();
     for (index, trailer) in trailers.iter().enumerate() {
         let row = adw::ActionRow::new();
         let row_box = gtk::Box::builder()
@@ -1708,18 +1944,17 @@ fn trailers_section(
         list.append(&row);
 
         // The playback heart keeps favoriting the movie/series itself.
-        titles.push(format!("{title} — Trailer {}", index + 1));
+        entries.push((format!("{title} — Trailer {}", index + 1), trailer.clone()));
     }
     // Routed via the list's row-activated signal (same mechanism as the
     // sidebar; per-row signals miss inert selection-NONE rows).
     let win = win.downgrade();
-    let titles = titles;
     list.connect_row_activated(move |_, row| {
-        let Some(activate_title) = titles.get(row.index() as usize) else {
+        let Some((trailer_title, url)) = entries.get(row.index() as usize) else {
             return;
         };
         if let Some(win) = win.upgrade() {
-            win.play_with_status(kind, id, activate_title, "Trailer");
+            win.play_trailer(kind, id, trailer_title, Some(url.clone()));
         }
     });
     section.append(&list);
@@ -1984,21 +2219,27 @@ struct SourceChips {
 
 impl SourceChips {
     /// Apply a ratings lookup result: fill the IMDb score and/or point
-    /// the IMDb chip at the exact title page. `None` (lookup failed)
-    /// leaves the plain external-link arrow.
-    fn apply(&self, ratings: Option<&crate::ratings::Ratings>) {
-        let Some(ratings) = ratings else {
-            self.imdb_score.set_text("↗");
-            return;
-        };
-        match &ratings.imdb {
+    /// the IMDb chip at the exact title page. When no source provides a
+    /// score, fall back to the panel's own rating; with neither, show
+    /// "N/A" (objective over invented).
+    fn apply(&self, ratings: Option<&crate::ratings::Ratings>, panel: Option<&str>) {
+        match ratings.and_then(|r| r.imdb.as_ref()) {
             Some(score) => {
                 self.imdb_score.remove_css_class("dim-label");
                 self.imdb_score.set_text(score);
             }
-            None => self.imdb_score.set_text("↗"),
+            None => match panel {
+                Some(score) => {
+                    self.imdb_score.remove_css_class("dim-label");
+                    self.imdb_score.set_text(score);
+                }
+                None => {
+                    self.imdb_score.add_css_class("dim-label");
+                    self.imdb_score.set_text("N/A");
+                }
+            },
         }
-        if let Some(id) = &ratings.imdb_id {
+        if let Some(id) = ratings.and_then(|r| r.imdb_id.as_ref()) {
             self.imdb_url
                 .replace(format!("https://www.imdb.com/title/{id}/"));
         }
@@ -2009,7 +2250,7 @@ impl SourceChips {
 /// half shows its score — or an external-link arrow when no score is
 /// (yet) available. Activating opens the source in the browser; the IMDb
 /// chip's score/url are updated in place by the ratings lookup.
-fn source_chips_row(title: &str, loading: bool) -> (gtk::Box, SourceChips) {
+fn source_chips_row(title: &str) -> (gtk::Box, SourceChips) {
     let query = glib::uri_escape_string(title, None::<&str>, false);
     let row = gtk::Box::builder()
         .spacing(6)
@@ -2020,9 +2261,10 @@ fn source_chips_row(title: &str, loading: bool) -> (gtk::Box, SourceChips) {
         "https://www.imdb.com/find/?q={query}"
     )));
     // While the ratings lookup runs, the score half shows a small
-    // placeholder; it settles into the score or the external-link arrow.
+    // placeholder; it settles into the score, the panel's rating or
+    // "N/A" once the lookup lands.
     let imdb_score = gtk::Label::builder()
-        .label(if loading { "…" } else { "↗" })
+        .label("…")
         .css_classes(["dim-label"])
         .build();
     row.append(&source_chip("IMDb", imdb_url.clone(), imdb_score.clone()));

@@ -1,13 +1,14 @@
 {
   "info": {
     "movie_image": "https://picsum.photos/seed/rtv-vod-big-5024/300/450",
-    "duration_secs": 6000,
-    "duration": "0:01:40:00",
+    "duration_secs": 7980,
+    "duration": "0:02:13:00",
     "plot": "An chess prodigy faces the machine she helped build.",
-    "cast": "Hana Sato, Diego Alvarez, Ruth Okonkwo",
-    "director": "Carmen Ruiz",
-    "genre": "Crime",
-    "releasedate": "2025-05-19",
-    "rating": "8.2"
+    "cast": "Tomas Weber, Aisha Bello, Luc Moreau",
+    "director": "Jonas Berg",
+    "genre": "Drama",
+    "releasedate": "1994-01-01",
+    "rating": "6.2",
+    "youtube_trailer": "https://media.w3.org/2010/05/bunny/trailer.mp4"
   }
 }
