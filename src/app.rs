@@ -104,6 +104,9 @@ fn load_css() {
         ".player.video-fill { border-radius: 0; }\n",
         ".heart-btn { opacity: 0.55; }\n",
         ".heart-btn.active { opacity: 1; color: #e01b24; }\n",
+        ".play-chip { opacity: 1; transition: opacity 160ms ease; }\n",
+        ".play-chip.hover-reveal { opacity: 0; }\n",
+        "row:hover .play-chip.hover-reveal { opacity: 1; }\n",
         ".controls { background: rgba(23, 23, 35, 0.85); border-radius: 12px; padding: 4px 6px; }\n",
         ".card { background: rgba(255, 255, 255, 0.06); border-radius: 12px; }\n",
     ));

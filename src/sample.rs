@@ -30,11 +30,11 @@ impl Kind {
 
     pub fn icon(self) -> &'static str {
         match self {
-            // Three deliberately distinct shapes: TV set, film strip,
-            // optical disc.
+            // Three clearly distinct monochrome shapes: a TV set, a video
+            // collection and a film strip.
             Kind::Live => "tv-symbolic",
-            Kind::Series => "video-x-generic-symbolic",
-            Kind::Vod => "media-optical-dvd-symbolic",
+            Kind::Series => "folder-videos-symbolic",
+            Kind::Vod => "video-x-generic-symbolic",
         }
     }
 }
