@@ -82,6 +82,7 @@ template $RtvWindow : Adw.ApplicationWindow {
                   hscrollbar-policy: never;
 
                   child: Gtk.ListBox content_list {
+                    activate-on-single-click: true;
                     styles ["navigation-sidebar"]
                   };
                 }
@@ -182,18 +183,13 @@ template $RtvWindow : Adw.ApplicationWindow {
                         child: Adw.Clamp {
                           maximum-size: 1000;
 
-                          child: Gtk.FlowBox favorites_grid {
+                          child: Gtk.Box favorites_box {
+                            orientation: vertical;
+                            spacing: 18;
                             margin-top: 12;
                             margin-start: 12;
                             margin-end: 12;
                             margin-bottom: 12;
-                            column-spacing: 12;
-                            row-spacing: 12;
-                            min-children-per-line: 3;
-                            max-children-per-line: 5;
-                            activate-on-single-click: true;
-                            selection-mode: none;
-                            valign: start;
                           };
                         };
                       }
@@ -356,7 +352,14 @@ template $RtvWindow : Adw.ApplicationWindow {
       child: Adw.ToolbarView {
 
         [top]
-        Adw.HeaderBar {}
+        Adw.HeaderBar {
+          [end]
+          Gtk.Button detail_heart {
+            icon-name: "rtv-heart-symbolic";
+            tooltip-text: _("Toggle favorite");
+            styles ["flat", "heart-btn"]
+          }
+        }
 
         content: Gtk.ScrolledWindow {
           hscrollbar-policy: never;
@@ -377,9 +380,9 @@ template $RtvWindow : Adw.ApplicationWindow {
       };
       }
 
-      /* Episodes of one season, pushed on top of the series details. */
+      /* Episodes of one season: detail header on top, episodes below. */
       Adw.NavigationPage episodes_page {
-      title: _("Season");
+      title: _("Episodes");
       can-pop: true;
 
       child: Adw.ToolbarView {
@@ -393,13 +396,13 @@ template $RtvWindow : Adw.ApplicationWindow {
           child: Adw.Clamp {
             maximum-size: 720;
 
-            child: Gtk.ListBox episodes_list {
+            child: Gtk.Box episodes_content {
+              orientation: vertical;
+              spacing: 12;
               margin-top: 12;
               margin-start: 12;
               margin-end: 12;
               margin-bottom: 24;
-              selection-mode: none;
-              styles ["boxed-list"]
             };
           };
         };
