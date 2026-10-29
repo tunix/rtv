@@ -57,8 +57,10 @@ pub fn run() {
 
     let app = adw::Application::new(Some("io.github.tunix.rtv"), gio::ApplicationFlags::empty());
 
-    // Classic media-player shortcuts; the actions no-op outside the player.
-    app.set_accels_for_action("win.play-pause", &["space"]);
+    // Classic media-player shortcuts. Play/pause is intentionally NOT
+    // here: a global space accelerator would swallow the space key while
+    // typing in the search entry, so it is scoped to the player page in
+    // window.rs instead.
     app.set_accels_for_action("win.seek-back", &["Left"]);
     app.set_accels_for_action("win.seek-forward", &["Right"]);
     app.set_accels_for_action("win.toggle-mute", &["m"]);
@@ -102,8 +104,6 @@ fn load_css() {
         ".player.video-fill { border-radius: 0; }\n",
         ".heart-btn { opacity: 0.55; }\n",
         ".heart-btn.active { opacity: 1; color: #e01b24; }\n",
-        ".card-scrim { background: rgba(0, 0, 0, 0.55); opacity: 0; transition: opacity 180ms ease; border-radius: 12px; }\n",
-        ".card-scrim:hover { opacity: 1; }\n",
         ".controls { background: rgba(23, 23, 35, 0.85); border-radius: 12px; padding: 4px 6px; }\n",
         ".card { background: rgba(255, 255, 255, 0.06); border-radius: 12px; }\n",
     ));

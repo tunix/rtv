@@ -182,18 +182,13 @@ template $RtvWindow : Adw.ApplicationWindow {
                         child: Adw.Clamp {
                           maximum-size: 1000;
 
-                          child: Gtk.FlowBox favorites_grid {
+                          child: Gtk.Box favorites_box {
+                            orientation: vertical;
+                            spacing: 18;
                             margin-top: 12;
                             margin-start: 12;
                             margin-end: 12;
                             margin-bottom: 12;
-                            column-spacing: 12;
-                            row-spacing: 12;
-                            min-children-per-line: 3;
-                            max-children-per-line: 5;
-                            activate-on-single-click: true;
-                            selection-mode: none;
-                            valign: start;
                           };
                         };
                       }
@@ -356,7 +351,14 @@ template $RtvWindow : Adw.ApplicationWindow {
       child: Adw.ToolbarView {
 
         [top]
-        Adw.HeaderBar {}
+        Adw.HeaderBar {
+          [end]
+          Gtk.Button detail_heart {
+            icon-name: "rtv-heart-symbolic";
+            tooltip-text: _("Toggle favorite");
+            styles ["flat", "heart-btn"]
+          }
+        }
 
         content: Gtk.ScrolledWindow {
           hscrollbar-policy: never;
@@ -371,35 +373,6 @@ template $RtvWindow : Adw.ApplicationWindow {
               margin-start: 12;
               margin-end: 12;
               margin-bottom: 24;
-            };
-          };
-        };
-      };
-      }
-
-      /* Episodes of one season, pushed on top of the series details. */
-      Adw.NavigationPage episodes_page {
-      title: _("Season");
-      can-pop: true;
-
-      child: Adw.ToolbarView {
-
-        [top]
-        Adw.HeaderBar {}
-
-        content: Gtk.ScrolledWindow {
-          hscrollbar-policy: never;
-
-          child: Adw.Clamp {
-            maximum-size: 720;
-
-            child: Gtk.ListBox episodes_list {
-              margin-top: 12;
-              margin-start: 12;
-              margin-end: 12;
-              margin-bottom: 24;
-              selection-mode: none;
-              styles ["boxed-list"]
             };
           };
         };

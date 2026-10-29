@@ -107,6 +107,8 @@ pub struct Episode {
     pub duration: Option<String>,
     /// Short summary from `info.plot`, shown on the episode rows.
     pub plot: Option<String>,
+    /// Episode thumbnail (`info.movie_image`), shown on the episode rows.
+    pub image: Option<String>,
 }
 
 /// Parsed `get_series_info` response. A season listed in `seasons[]` may
@@ -301,6 +303,10 @@ fn parse_series_info(value: &Value) -> Option<SeriesInfo> {
                                 container: str_field(e, "container_extension"),
                                 duration: e.get("info").and_then(|i| str_field(i, "duration")),
                                 plot: e.get("info").and_then(|i| str_field(i, "plot")),
+                                image: e
+                                    .get("info")
+                                    .and_then(|i| str_field(i, "movie_image"))
+                                    .or_else(|| str_field(e, "movie_image")),
                             }
                         })
                         .collect()
