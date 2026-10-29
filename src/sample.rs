@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use serde_json::Value;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
     Live,
     Series,
@@ -17,7 +17,8 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 3] = [Kind::Live, Kind::Series, Kind::Vod];
+    /// Sidebar display order: Live TV, Movies, Series.
+    pub const SIDEBAR: [Kind; 3] = [Kind::Live, Kind::Vod, Kind::Series];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -29,9 +30,11 @@ impl Kind {
 
     pub fn icon(self) -> &'static str {
         match self {
-            Kind::Live => "video-display-symbolic",
-            Kind::Series => "folder-videos-symbolic",
-            Kind::Vod => "video-x-generic-symbolic",
+            // Three deliberately distinct shapes: TV set, film strip,
+            // optical disc.
+            Kind::Live => "tv-symbolic",
+            Kind::Series => "video-x-generic-symbolic",
+            Kind::Vod => "media-optical-dvd-symbolic",
         }
     }
 }
