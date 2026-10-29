@@ -129,6 +129,8 @@ pub struct VodInfo {
     pub director: Option<String>,
     pub duration: Option<String>,
     pub release_date: Option<String>,
+    /// YouTube trailer link, when the panel carries one.
+    pub trailer: Option<String>,
 }
 
 /// Fetch series info (seasons + episodes) asynchronously; `done` runs on
@@ -341,6 +343,7 @@ fn parse_vod_info(value: &Value) -> Option<VodInfo> {
         director: str_field(info, "director"),
         duration: str_field(info, "duration"),
         release_date: str_field(info, "releasedate").or_else(|| str_field(info, "releaseDate")),
+        trailer: str_field(info, "youtube_trailer"),
     })
 }
 

@@ -3,7 +3,7 @@ use gtk::{gio, glib};
 use std::cell::RefCell;
 
 use crate::details::{self, Episode, SeriesInfo};
-use crate::sample::{self, Item, Kind};
+use crate::sample::{self, Item, Kind, SeriesMeta};
 
 /// Search results are capped so a one-letter query cannot flood the grid;
 /// the backend phase will replace this with real incremental search.
@@ -18,6 +18,16 @@ pub struct FavKey {
     pub kind: Kind,
     pub id: i64,
     pub name: String,
+}
+
+/// What the series detail and episodes pages need to render the shared
+/// header, kept together so both pages can show the same top section.
+#[derive(Debug, Clone)]
+pub struct SeriesCtx {
+    pub id: i64,
+    pub name: String,
+    pub cover: Option<String>,
+    pub meta: SeriesMeta,
 }
 
 /// Sidebar section header row: icon + bold label, click toggles collapse.
@@ -126,6 +136,10 @@ mod imp {
         pub detail_heart: TemplateChild<gtk::Button>,
         #[template_child]
         pub detail_content: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub episodes_page: TemplateChild<adw::NavigationPage>,
+        #[template_child]
+        pub episodes_content: TemplateChild<gtk::Box>,
 
         /// Sample catalog loaded from samples/ (mock phase).
         pub catalog: OnceLock<Catalog>,
@@ -382,7 +396,6 @@ impl Window {
         let favorites_label = gtk::Label::builder()
             .label("Favorites (0)")
             .halign(gtk::Align::Start)
-            .margin_start(6)
             .css_classes(["heading"])
             .build();
         favorites_box.append(&favorites_label);
@@ -461,7 +474,8 @@ impl Window {
             entry.set_text("");
         });
 
-        // When the player page pops off, its state is gone.
+        // When the player or the episodes page pops off, their state is
+        // gone; the episodes page drops its (cover-fetching) children.
         let win = self.downgrade();
         imp.main_view.connect_popped(move |_, popped_page| {
             let Some(win) = win.upgrade() else { return };
@@ -469,6 +483,11 @@ impl Window {
             if popped_page == &*i.player_page {
                 i.on_player.set(false);
                 win.cancel_hide();
+            }
+            if popped_page == &*i.episodes_page {
+                while let Some(child) = i.episodes_content.first_child() {
+                    i.episodes_content.remove(&child);
+                }
             }
         });
 
@@ -664,7 +683,9 @@ impl Window {
                     .ellipsize(gtk::pango::EllipsizeMode::End)
                     .build();
                 let row = gtk::ListBoxRow::new();
-                let row_box = gtk::Box::builder().margin_start(26).build();
+                // Icon (14px) + spacing (6px) put the header label at 20px;
+                // category rows align their text with it.
+                let row_box = gtk::Box::builder().margin_start(20).build();
                 row_box.append(&label);
                 row.set_child(Some(&row_box));
                 imp.content_list.append(&row);
@@ -1152,21 +1173,15 @@ impl Window {
             .and_then(|c| c.series_meta.get(&id).cloned())
             .unwrap_or_default();
 
-        // Ratings are labeled with their source: the panel rating is the
-        // IMDb score.
-        let rating = meta
-            .rating
-            .as_deref()
-            .map(|r| format!("IMDb: {r}"))
-            .filter(|r| r != "IMDb: 0");
-        imp.detail_content.append(&detail_header(
-            name,
-            cover.or(meta.cover.as_deref()),
-            &[rating, meta.genre.clone(), meta.release_date.clone()],
-            meta.cast.as_deref(),
-            meta.director.as_deref(),
-            meta.episode_run_time.as_deref(),
-        ));
+        let ctx = SeriesCtx {
+            id,
+            name: name.to_string(),
+            cover: cover.map(str::to_string).or_else(|| meta.cover.clone()),
+            meta: meta.clone(),
+        };
+
+        let (header, _) = detail_header(name, ctx.cover.as_deref(), &series_meta_lines(&meta));
+        imp.detail_content.append(&header);
 
         if let Some(plot) = &meta.plot {
             imp.detail_content.append(&plot_label(plot));
@@ -1176,17 +1191,11 @@ impl Window {
         // title searches, since the panels carry no source-specific ids.
         imp.detail_content.append(&links_row(name));
 
-        // Trailers get their own section next to Seasons: a series can
-        // carry several of them (even one per season).
-        if let Some(trailer) = &meta.trailer {
-            imp.detail_content.append(&section_title("Trailers"));
-            imp.detail_content.append(
-                &gtk::LinkButton::builder()
-                    .uri(trailer)
-                    .label("Watch trailer")
-                    .halign(gtk::Align::Start)
-                    .build(),
-            );
+        // Trailers get their own section above Seasons: a series can carry
+        // several of them (even one per season).
+        let trailers: Vec<String> = meta.trailer.clone().into_iter().collect();
+        if let Some(section) = trailers_section(self, Kind::Series, id, name, &trailers) {
+            imp.detail_content.append(&section);
         }
 
         imp.detail_content.append(&section_title("Seasons"));
@@ -1194,20 +1203,11 @@ impl Window {
             .orientation(gtk::Orientation::Vertical)
             .spacing(6)
             .build();
-        seasons_box.append(
-            &gtk::Spinner::builder()
-                .spinning(true)
-                .halign(gtk::Align::Center)
-                .valign(gtk::Align::Center)
-                .margin_top(12)
-                .margin_bottom(12)
-                .build(),
-        );
+        seasons_box.append(&spinner());
         imp.detail_content.append(&seasons_box);
 
         let win = self.downgrade();
         let seasons_box = seasons_box.clone();
-        let series_name = name.to_string();
         details::series_info(id, move |result| {
             let Some(win) = win.upgrade() else {
                 return;
@@ -1216,19 +1216,13 @@ impl Window {
             if i.details_generation.get() != generation {
                 return;
             }
-            win.fill_seasons(&seasons_box, result, id, &series_name);
+            win.fill_seasons(&seasons_box, result, ctx);
         });
     }
 
     /// Replace the seasons spinner with the season rows (or a graceful
     /// empty/failure state). Runs on the main loop from the fetch callback.
-    fn fill_seasons(
-        &self,
-        seasons_box: &gtk::Box,
-        result: Option<SeriesInfo>,
-        series_id: i64,
-        series_name: &str,
-    ) {
+    fn fill_seasons(&self, seasons_box: &gtk::Box, result: Option<SeriesInfo>, ctx: SeriesCtx) {
         while let Some(child) = seasons_box.first_child() {
             seasons_box.remove(&child);
         }
@@ -1246,6 +1240,7 @@ impl Window {
 
         let list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::None)
+            .activate_on_single_click(true)
             .css_classes(["boxed-list"])
             .build();
         for season in &info.seasons {
@@ -1297,22 +1292,16 @@ impl Window {
             }
             row.set_child(Some(&row_box));
 
-            // Activating a season swaps the list below the (unchanged)
-            // page header for that season's episodes.
+            // Activating a season opens the episodes page: the detail
+            // page's header stays on top, the season's episodes are
+            // listed below.
             let info = info.clone();
-            let seasons_box = seasons_box.clone();
-            let series_name = series_name.to_string();
+            let ctx = ctx.clone();
             let season_number = season.number;
             let win = self.downgrade();
             row.connect_activated(move |_| {
                 if let Some(win) = win.upgrade() {
-                    win.show_season_episodes(
-                        &seasons_box,
-                        &info,
-                        season_number,
-                        series_id,
-                        &series_name,
-                    );
+                    win.show_episodes(&info, &ctx, season_number);
                 }
             });
             list.append(&row);
@@ -1320,47 +1309,28 @@ impl Window {
         seasons_box.append(&list);
     }
 
-    /// Replace the season list (inside the series detail page, the page
-    /// header stays) with the episode rows of one season. A back button
-    /// returns to the season list without losing the fetched data.
-    fn show_season_episodes(
-        &self,
-        seasons_box: &gtk::Box,
-        info: &SeriesInfo,
-        season_number: i64,
-        series_id: i64,
-        series_name: &str,
-    ) {
-        while let Some(child) = seasons_box.first_child() {
-            seasons_box.remove(&child);
+    /// Push the episodes page for one season: the detail header (cover,
+    /// title, Key: value metadata) stays on top, the season's episodes
+    /// are listed below.
+    fn show_episodes(&self, info: &SeriesInfo, ctx: &SeriesCtx, season_number: i64) {
+        let imp = self.imp();
+        imp.episodes_page
+            .set_title(&format!("{} · Season {season_number}", ctx.name));
+        while let Some(child) = imp.episodes_content.first_child() {
+            imp.episodes_content.remove(&child);
         }
 
-        let header = gtk::Box::builder().spacing(6).build();
-        let back = gtk::Button::builder()
-            .icon_name("go-previous-symbolic")
-            .tooltip_text("All seasons")
-            .valign(gtk::Align::Center)
-            .css_classes(["flat"])
-            .build();
-        let back_info = info.clone();
-        let back_box = seasons_box.clone();
-        let back_name = series_name.to_string();
-        let win = self.downgrade();
-        back.connect_clicked(move |_| {
-            if let Some(win) = win.upgrade() {
-                win.fill_seasons(&back_box, Some(back_info.clone()), series_id, &back_name);
-            }
-        });
-        header.append(&back);
-        header.append(
-            &gtk::Label::builder()
-                .label(format!("Season {season_number}"))
-                .halign(gtk::Align::Start)
-                .valign(gtk::Align::Center)
-                .css_classes(["title-3"])
-                .build(),
+        let (header, _) = detail_header(
+            &ctx.name,
+            ctx.cover.as_deref(),
+            &series_meta_lines(&ctx.meta),
         );
-        seasons_box.append(&header);
+        imp.episodes_content.append(&header);
+        if let Some(plot) = &ctx.meta.plot {
+            imp.episodes_content.append(&plot_label(plot));
+        }
+        imp.episodes_content
+            .append(&section_title(&format!("Season {season_number}")));
 
         let episodes = info
             .episodes
@@ -1369,29 +1339,34 @@ impl Window {
             .unwrap_or_default();
         if episodes.is_empty() {
             // A season listed in seasons[] may have no episode entries.
-            seasons_box.append(&dim_label("No episodes available for this season."));
+            imp.episodes_content
+                .append(&dim_label("No episodes available for this season."));
+            imp.main_view.push(&*imp.episodes_page);
             return;
         }
 
         let list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::None)
+            .activate_on_single_click(true)
             .css_classes(["boxed-list"])
             .build();
         for episode in &episodes {
             list.append(&episode_row(
                 episode,
-                series_id,
-                series_name,
+                ctx.id,
+                &ctx.name,
                 season_number,
                 self.downgrade(),
             ));
         }
-        seasons_box.append(&list);
+        imp.episodes_content.append(&list);
+        imp.main_view.push(&*imp.episodes_page);
     }
 
-    /// Movie body, laid out like the series page: header with a
-    /// source-labeled rating, a prominent Play button, then the fetched
-    /// metadata (plot, links, cast, director, duration) below.
+    /// Movie body, laid out like the series page: cover with the Key:
+    /// value details to its right, a prominent Play button, then
+    /// trailers, links and the plot at the very bottom. The details
+    /// arrive async and fill into the header's info column.
     fn open_vod_details(
         &self,
         id: i64,
@@ -1401,19 +1376,10 @@ impl Window {
         generation: u64,
     ) {
         let imp = self.imp();
-        let rating = rating
-            .as_deref()
-            .map(|r| format!("IMDb: {r}"))
-            .filter(|r| r != "IMDb: 0");
-
-        imp.detail_content.append(&detail_header(
-            name,
-            cover,
-            &[rating, None, None],
-            None,
-            None,
-            None,
-        ));
+        let imdb = rating.filter(|r| r != "0").map(|r| ("IMDb".to_string(), r));
+        let (header, info_col) = detail_header(name, cover, &[imdb]);
+        imp.detail_content.append(&header);
+        info_col.append(&spinner());
 
         let play = gtk::Button::builder()
             .label("Play")
@@ -1429,25 +1395,8 @@ impl Window {
         });
         imp.detail_content.append(&play);
 
-        // Details area: spinner while the fetch runs, replaced by the
-        // meta/plot block on success or a graceful note on failure.
-        let details_box = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(6)
-            .build();
-        details_box.append(
-            &gtk::Spinner::builder()
-                .spinning(true)
-                .halign(gtk::Align::Center)
-                .valign(gtk::Align::Center)
-                .margin_top(12)
-                .margin_bottom(12)
-                .build(),
-        );
-        imp.detail_content.append(&details_box);
-
         let win = self.downgrade();
-        let details_box = details_box.clone();
+        let info_col = info_col.clone();
         let title = name.to_string();
         details::vod_info(id, move |result| {
             let Some(win) = win.upgrade() else {
@@ -1457,44 +1406,52 @@ impl Window {
             if i.details_generation.get() != generation {
                 return;
             }
-            win.fill_vod_details(&details_box, result, &title);
+            win.fill_vod_details(id, &title, &info_col, result);
         });
     }
 
-    /// Replace the movie-details spinner with the fetched metadata (or a
-    /// graceful failure note; name/rating/cover are already on the page).
+    /// Fill the movie header's info column with the fetched Key: value
+    /// details, then trailers, links and (last) the plot.
     fn fill_vod_details(
         &self,
-        details_box: &gtk::Box,
-        result: Option<details::VodInfo>,
+        id: i64,
         name: &str,
+        info_col: &gtk::Box,
+        result: Option<details::VodInfo>,
     ) {
-        while let Some(child) = details_box.first_child() {
-            details_box.remove(&child);
+        let imp = self.imp();
+        while let Some(child) = info_col.first_child() {
+            info_col.remove(&child);
         }
         let Some(info) = result else {
             self.toast("Could not load movie details");
-            details_box.append(&dim_label(
+            info_col.append(&dim_label(
                 "Movie details are unavailable right now. Play still works.",
             ));
             return;
         };
 
-        if let Some(meta) = meta_line(&[info.genre, info.release_date]) {
-            details_box.append(&dim_label(&meta));
+        for (key, value) in [
+            info.genre.map(|v| ("Genre", v)),
+            info.release_date.map(|v| ("Released", v)),
+            info.cast.map(|v| ("Cast", v)),
+            info.director.map(|v| ("Director", v)),
+            info.duration.map(|v| ("Duration", format_duration(&v))),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            info_col.append(&kv_line(key, &value));
         }
+
+        // Trailers play in-app like the series ones.
+        let trailers: Vec<String> = info.trailer.into_iter().collect();
+        if let Some(section) = trailers_section(self, Kind::Vod, id, name, &trailers) {
+            imp.detail_content.append(&section);
+        }
+        imp.detail_content.append(&links_row(name));
         if let Some(plot) = &info.plot {
-            details_box.append(&plot_label(plot));
-        }
-        details_box.append(&links_row(name));
-        if let Some(cast) = &info.cast {
-            details_box.append(&dim_label(&format!("Cast: {cast}")));
-        }
-        if let Some(director) = &info.director {
-            details_box.append(&dim_label(&format!("Director: {director}")));
-        }
-        if let Some(duration) = &info.duration {
-            details_box.append(&dim_label(&format!("Duration: {duration}")));
+            imp.detail_content.append(&plot_label(plot));
         }
     }
 
@@ -1580,18 +1537,15 @@ impl Window {
     }
 }
 
-/// Detail-page header: cover art on the left, title + "genre · rating ·
-/// date" meta line (+ optional cast, director and run-time lines) on the
-/// right.
-#[allow(clippy::too_many_arguments)]
+/// Detail-page header: cover art on the left (click opens a full-size
+/// preview popup), title + stacked "Key: value" lines on the right.
+/// Returns the whole header box and its info column, so async fetches
+/// (movie details) can append more lines later.
 fn detail_header(
     title: &str,
     cover: Option<&str>,
-    meta: &[Option<String>],
-    cast: Option<&str>,
-    director: Option<&str>,
-    run_time: Option<&str>,
-) -> gtk::Box {
+    lines: &[Option<(String, String)>],
+) -> (gtk::Box, gtk::Box) {
     let box_ = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(18)
@@ -1614,24 +1568,139 @@ fn detail_header(
             .css_classes(["title-2"])
             .build(),
     );
-    if let Some(meta) = meta_line(meta) {
-        info.append(&dim_label(&meta));
-    }
-    if let Some(cast) = cast {
-        info.append(&dim_label(&format!("Cast: {cast}")));
-    }
-    if let Some(director) = director {
-        info.append(&dim_label(&format!("Director: {director}")));
-    }
-    if let Some(run_time) = run_time {
-        info.append(&dim_label(&format!("~{run_time} min per episode")));
+    for (key, value) in lines.iter().flatten() {
+        info.append(&kv_line(key, value));
     }
     box_.append(&info);
-    box_
+    (box_, info)
+}
+
+/// "Key: value" with the key in bold; values are markup-escaped.
+fn kv_line(key: &str, value: &str) -> gtk::Label {
+    let escaped = glib::markup_escape_text(value);
+    gtk::Label::builder()
+        .use_markup(true)
+        .label(format!("<b>{key}:</b> {escaped}"))
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .xalign(0.0)
+        .halign(gtk::Align::Start)
+        .build()
+}
+
+/// The shared series header lines: Genre, IMDb, Released, Cast, Director
+/// and episode length. The panel only carries the IMDb rating; further
+/// review-site scores appear here once a source provides them.
+fn series_meta_lines(meta: &SeriesMeta) -> Vec<Option<(String, String)>> {
+    [
+        meta.genre.clone().map(|v| ("Genre".to_string(), v)),
+        meta.rating
+            .clone()
+            .filter(|r| r != "0")
+            .map(|v| ("IMDb".to_string(), v)),
+        meta.release_date
+            .clone()
+            .map(|v| ("Released".to_string(), v)),
+        meta.cast.clone().map(|v| ("Cast".to_string(), v)),
+        meta.director.clone().map(|v| ("Director".to_string(), v)),
+        meta.episode_run_time
+            .clone()
+            .map(|v| ("Episode length".to_string(), format!("~{v} min"))),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// Trailers listed as rows with a thumbnail; activating one plays it in
+/// the app (mock player) instead of leaving for a website. Returns None
+/// when there is nothing to list.
+fn trailers_section(
+    win: &Window,
+    kind: Kind,
+    id: i64,
+    title: &str,
+    trailers: &[String],
+) -> Option<gtk::Box> {
+    if trailers.is_empty() {
+        return None;
+    }
+    let section = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .build();
+    section.append(&section_title("Trailers"));
+
+    let list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .activate_on_single_click(true)
+        .css_classes(["boxed-list"])
+        .build();
+    for (index, trailer) in trailers.iter().enumerate() {
+        let row = adw::ActionRow::new();
+        let row_box = gtk::Box::builder()
+            .spacing(12)
+            .margin_top(8)
+            .margin_bottom(8)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+        row_box.append(&cover_art(youtube_thumb(trailer).as_deref(), 64, 36));
+        row_box.append(
+            &gtk::Label::builder()
+                .label(if trailers.len() == 1 {
+                    "Trailer".to_string()
+                } else {
+                    format!("Trailer {}", index + 1)
+                })
+                .halign(gtk::Align::Start)
+                .valign(gtk::Align::Center)
+                .hexpand(true)
+                .build(),
+        );
+        row_box.append(
+            &gtk::Image::builder()
+                .icon_name("media-playback-start-symbolic")
+                .valign(gtk::Align::Center)
+                .build(),
+        );
+        row.set_child(Some(&row_box));
+
+        // The playback heart keeps favoriting the movie/series itself.
+        let trailer_title = format!("{title} — Trailer {}", index + 1);
+        let win = win.downgrade();
+        row.connect_activated(move |_| {
+            if let Some(win) = win.upgrade() {
+                win.play_with_status(kind, id, &trailer_title, "Trailer");
+            }
+        });
+        list.append(&row);
+    }
+    section.append(&list);
+    Some(section)
+}
+
+/// Thumbnail URL for a YouTube trailer link (mqdefault); mock ids do not
+/// resolve, and the cover placeholder covers that gracefully.
+fn youtube_thumb(url: &str) -> Option<String> {
+    let id = url
+        .split('?')
+        .nth(1)
+        .and_then(|query| {
+            query
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("v=").map(str::to_string))
+        })
+        .or_else(|| {
+            url.split("youtu.be/")
+                .nth(1)
+                .and_then(|rest| rest.split(['?', '/']).next().map(str::to_string))
+        })?;
+    (!id.is_empty()).then(|| format!("https://img.youtube.com/vi/{id}/mqdefault.jpg"))
 }
 
 /// Cover art box with placeholder + async picture fill (same mechanics as
-/// the content cards). Falls back to the placeholder on any failure.
+/// the content cards). Falls back to the placeholder on any failure. Once
+/// a real image is loaded, clicking it opens a full-size preview popup.
 fn cover_art(url: Option<&str>, width: i32, height: i32) -> gtk::Overlay {
     let art = gtk::Box::builder()
         .css_classes(["card"])
@@ -1657,18 +1726,96 @@ fn cover_art(url: Option<&str>, width: i32, height: i32) -> gtk::Overlay {
     overlay.add_overlay(&placeholder);
     overlay.add_overlay(&picture);
 
+    let loaded = std::rc::Rc::new(RefCell::new(None::<gtk::gdk::Texture>));
     if let Some(url) = url {
-        crate::covers::fetch(url.to_string(), move |path| {
-            if let Some(path) = path {
-                if let Ok(texture) = gtk::gdk::Texture::from_filename(&path) {
-                    picture.set_paintable(Some(&texture));
-                    picture.set_visible(true);
-                    placeholder.set_visible(false);
+        let loaded = loaded.clone();
+        crate::covers::fetch(url.to_string(), {
+            let picture = picture.clone();
+            let placeholder = placeholder.clone();
+            let overlay = overlay.clone();
+            move |path| {
+                if let Some(path) = path {
+                    if let Ok(texture) = gtk::gdk::Texture::from_filename(&path) {
+                        loaded.replace(Some(texture.clone()));
+                        picture.set_paintable(Some(&texture));
+                        picture.set_visible(true);
+                        placeholder.set_visible(false);
+                        if let Some(cursor) = gtk::gdk::Cursor::from_name("pointer", None) {
+                            overlay.set_cursor(Some(&cursor));
+                        }
+                    }
                 }
             }
         });
     }
+
+    let click = gtk::GestureClick::new();
+    click.connect_pressed({
+        let loaded = loaded.clone();
+        let overlay = overlay.clone();
+        move |_, _, _, _| {
+            if let Some(texture) = loaded.borrow().as_ref() {
+                open_preview(&overlay, texture);
+            }
+        }
+    });
+    overlay.add_controller(click);
+
     overlay
+}
+
+/// Modal preview popup showing the same image at full size; clicking it
+/// or pressing Escape closes it.
+fn open_preview(parent: &impl glib::object::IsA<gtk::Widget>, texture: &gtk::gdk::Texture) {
+    let window = adw::Window::new();
+    window.set_modal(true);
+    if let Some(root) = parent.root().and_downcast::<adw::ApplicationWindow>() {
+        window.set_transient_for(Some(&root));
+    }
+    window.set_title(Some("Preview"));
+    window.set_default_size(760, 560);
+
+    let picture = gtk::Picture::builder()
+        .paintable(texture)
+        .content_fit(gtk::ContentFit::Contain)
+        .hexpand(true)
+        .vexpand(true)
+        .build();
+
+    let click = gtk::GestureClick::new();
+    click.connect_pressed({
+        let window = window.clone();
+        move |_, _, _, _| window.close()
+    });
+    picture.add_controller(click);
+
+    let keys = gtk::EventControllerKey::new();
+    keys.connect_key_pressed({
+        let window = window.clone();
+        move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape {
+                window.close();
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        }
+    });
+    picture.add_controller(keys);
+
+    window.set_content(Some(&picture));
+    window.present();
+}
+
+/// Centered spinner used as the placeholder of async-filled sections.
+fn spinner() -> gtk::Spinner {
+    gtk::Spinner::builder()
+        .spinning(true)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .margin_top(12)
+        .margin_bottom(12)
+        .build()
 }
 
 fn plot_label(text: &str) -> gtk::Label {
@@ -1690,12 +1837,6 @@ fn dim_label(text: &str) -> gtk::Label {
         .halign(gtk::Align::Start)
         .css_classes(["dim-label"])
         .build()
-}
-
-/// "genre · rating · date" from whichever parts are present.
-fn meta_line(parts: &[Option<String>]) -> Option<String> {
-    let joined: Vec<&str> = parts.iter().flatten().map(String::as_str).collect();
-    (!joined.is_empty()).then(|| joined.join(" · "))
 }
 
 /// Bold section heading inside a detail page ("Seasons", "Trailers").
@@ -1731,18 +1872,41 @@ fn links_row(title: &str) -> gtk::Box {
     row
 }
 
-/// "0:36:00" / "36:00" panel durations become "36 min"; anything that
-/// does not parse is shown verbatim.
+/// "0:02:06:00" / "0:36:00" panel durations become "2 hours 6 minutes" /
+/// "36 minutes"; anything that does not parse is shown verbatim.
 fn format_duration(raw: &str) -> String {
     let parts: Vec<u64> = raw
         .split(':')
         .map(|p| p.trim().parse::<u64>())
         .collect::<Result<_, _>>()
         .unwrap_or_default();
-    match parts.as_slice() {
-        [h, m, _s] => format!("{} min", h * 60 + m),
-        [m, _s] => format!("{m} min"),
-        _ => raw.to_string(),
+    // Panels vary: days:hours:minutes:seconds, hours:minutes:seconds or
+    // minutes:seconds.
+    let (hours, minutes) = match parts.as_slice() {
+        [days, hours, minutes, _seconds] => (days * 24 + hours, *minutes),
+        [hours, minutes, _seconds] => (*hours, *minutes),
+        [minutes, _seconds] => (0, *minutes),
+        _ => return raw.to_string(),
+    };
+    let mut phrase: Vec<String> = Vec::new();
+    if hours > 0 {
+        phrase.push(if hours == 1 {
+            "1 hour".to_string()
+        } else {
+            format!("{hours} hours")
+        });
+    }
+    if minutes > 0 {
+        phrase.push(if minutes == 1 {
+            "1 minute".to_string()
+        } else {
+            format!("{minutes} minutes")
+        });
+    }
+    if phrase.is_empty() {
+        "0 minutes".to_string()
+    } else {
+        phrase.join(" ")
     }
 }
 

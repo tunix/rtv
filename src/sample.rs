@@ -30,9 +30,11 @@ impl Kind {
 
     pub fn icon(self) -> &'static str {
         match self {
-            Kind::Live => "video-display-symbolic",
-            Kind::Series => "folder-videos-symbolic",
-            Kind::Vod => "video-x-generic-symbolic",
+            // Three deliberately distinct shapes: TV set, film strip,
+            // optical disc.
+            Kind::Live => "tv-symbolic",
+            Kind::Series => "video-x-generic-symbolic",
+            Kind::Vod => "media-optical-dvd-symbolic",
         }
     }
 }
