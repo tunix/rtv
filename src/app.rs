@@ -55,6 +55,11 @@ pub fn install_runtime_icons() {
 pub fn run() {
     crate::register_resources();
 
+    // The fallback window title (alt-tab for unmatched windows) — libadwaita
+    // ignores GtkWindow:title on AdwWindow, so GTK would otherwise fall
+    // back to the raw application id.
+    glib::set_application_name("RTV");
+
     let app = adw::Application::new(Some("io.github.tunix.rtv"), gio::ApplicationFlags::empty());
 
     // Classic media-player shortcuts. Play/pause is intentionally NOT
@@ -102,12 +107,40 @@ fn load_css() {
     css.load_from_string(concat!(
         ".player { background: #171723; border-radius: 16px; }\n",
         ".player.video-fill { border-radius: 0; }\n",
+        // The player chrome adapts to the theme: a light pill with dark
+        // controls in light mode, dark pill with light controls in dark
+        // mode — always readable over the video.
+        ".controls {\n",
+        "  background: alpha(@window_bg_color, 0.92);\n",
+        "  color: @window_fg_color;\n",
+        "  border-radius: 12px;\n",
+        "  padding: 6px 10px;\n",
+        "}\n",
+        ".controls button {\n",
+        "  color: @window_fg_color;\n",
+        "}\n",
+        ".controls button:hover, .controls button:active {\n",
+        "  background: alpha(@window_fg_color, 0.12);\n",
+        "}\n",
+        ".controls scale trough {\n",
+        "  background: alpha(@window_fg_color, 0.28);\n",
+        "}\n",
+        ".controls scale highlight {\n",
+        "  background: @accent_bg_color;\n",
+        "}\n",
+        ".controls scale slider {\n",
+        "  background: @window_bg_color;\n",
+        "  color: @window_fg_color;\n",
+        "  border: 1px solid alpha(@window_fg_color, 0.4);\n",
+        "}\n",
+        ".controls label {\n",
+        "  color: @window_fg_color;\n",
+        "}\n",
         ".heart-btn { opacity: 0.55; }\n",
         ".heart-btn.active { opacity: 1; color: #e01b24; }\n",
         ".play-chip { opacity: 1; transition: opacity 160ms ease; }\n",
         ".play-chip.hover-reveal { opacity: 0; }\n",
         "row:hover .play-chip.hover-reveal { opacity: 1; }\n",
-        ".controls { background: rgba(23, 23, 35, 0.85); border-radius: 12px; padding: 4px 6px; }\n",
         ".card { background: rgba(255, 255, 255, 0.06); border-radius: 12px; }\n",
     ));
     if let Some(display) = gdk::Display::default() {

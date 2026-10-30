@@ -20,10 +20,10 @@ use soup::prelude::*;
 /// The panel's origin filters User-Agents (see AGENTS.md): requests with
 /// CLI UAs get the connection killed and Cloudflare reports HTTP 520.
 /// Every request MUST present an app-like User-Agent.
-const USER_AGENT: &str = "okhttp/4.9.3";
+pub const USER_AGENT: &str = "okhttp/4.9.3";
 
 thread_local! {
-    static SESSION: soup::Session = soup::Session::new();
+    static SESSION: soup::Session = soup::Session::builder().timeout(30).build();
     static SERIES_CACHE: RefCell<HashMap<i64, SeriesInfo>> = RefCell::new(HashMap::new());
     static VOD_CACHE: RefCell<HashMap<i64, VodInfo>> = RefCell::new(HashMap::new());
 }
@@ -103,7 +103,6 @@ pub struct Season {
 pub struct Episode {
     pub number: i64,
     pub title: String,
-    pub container: Option<String>,
     pub duration: Option<String>,
     /// Short summary from `info.plot`, shown on the episode rows.
     pub plot: Option<String>,
@@ -302,7 +301,6 @@ fn parse_series_info(value: &Value) -> Option<SeriesInfo> {
                                 number,
                                 title: str_field(e, "title")
                                     .unwrap_or_else(|| format!("Episode {number}")),
-                                container: str_field(e, "container_extension"),
                                 duration: e.get("info").and_then(|i| str_field(i, "duration")),
                                 plot: e.get("info").and_then(|i| str_field(i, "plot")),
                                 image: e
@@ -372,7 +370,6 @@ mod tests {
         let episodes = &info.episodes[&1];
         assert_eq!(episodes.len(), 10);
         assert_eq!(episodes[0].number, 1);
-        assert_eq!(episodes[0].container.as_deref(), Some("mkv"));
         assert!(episodes[0].duration.is_some());
         // The season without an episodes entry still yields an empty list.
         assert!(info.episodes.get(&0).unwrap_or(&Vec::new()).is_empty());
