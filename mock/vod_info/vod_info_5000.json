@@ -1,13 +1,14 @@
 {
   "info": {
     "movie_image": "https://picsum.photos/seed/rtv-vod-big-5000/300/450",
-    "duration_secs": 7560,
-    "duration": "0:02:06:00",
-    "plot": "Two strangers swap suitcases at a station and inherit each other's enemies.",
-    "cast": "Tomas Weber, Aisha Bello, Luc Moreau",
-    "director": "Carmen Ruiz",
-    "genre": "Comedy",
-    "releasedate": "2018-07-02",
-    "rating": "6.7"
+    "duration_secs": 7260,
+    "duration": "0:02:01:00",
+    "plot": "A gardener cultivates a species that blooms once a century \u2014 tonight.",
+    "cast": "Marek Nowak, Sofia Rossi, Jin Park",
+    "director": "Aylin Demir",
+    "genre": "Sci-Fi",
+    "releasedate": "2010-01-01",
+    "rating": "5.5",
+    "youtube_trailer": "https://media.w3.org/2010/05/bunny/trailer.mp4"
   }
 }

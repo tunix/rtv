@@ -1,6 +1,9 @@
 use adw::prelude::*;
 use gtk::{gio, glib};
 use std::cell::RefCell;
+use std::rc::Rc;
+
+use gstreamer::prelude::*;
 
 use crate::details::{self, Episode, SeriesInfo};
 use crate::sample::{self, Item, Kind, SeriesMeta};
@@ -99,6 +102,8 @@ mod imp {
         #[template_child]
         pub app_watermark: TemplateChild<gtk::Image>,
         #[template_child]
+        pub video_surface: TemplateChild<gtk::Picture>,
+        #[template_child]
         pub controls_revealer: TemplateChild<gtk::Revealer>,
         #[template_child]
         pub play_button_small: TemplateChild<gtk::Button>,
@@ -106,6 +111,14 @@ mod imp {
         pub seek_back: TemplateChild<gtk::Button>,
         #[template_child]
         pub seek_forward: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub scrub_row: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub seek_scale: TemplateChild<gtk::Scale>,
+        #[template_child]
+        pub elapsed_label: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub duration_label: TemplateChild<gtk::Label>,
         #[template_child]
         pub mute_button: TemplateChild<gtk::Button>,
         #[template_child]
@@ -148,6 +161,12 @@ mod imp {
         pub muted: Cell<bool>,
         pub has_source: Cell<bool>,
         pub on_player: Cell<bool>,
+        /// Whether the current playback target is live TV (drives the
+        /// LIVE badge).
+        pub is_live: Cell<bool>,
+        /// Active GStreamer pipeline for real playback (trailers); None
+        /// means the demo player is on screen.
+        pub pipeline: RefCell<Option<gstreamer::Element>>,
         pub selected_category: Cell<i32>,
         pub last_pointer: Cell<(f64, f64)>,
         pub favorites: RefCell<Vec<FavKey>>,
@@ -174,6 +193,12 @@ mod imp {
         /// generation may hide the controls (stale timers must no-op, since
         /// `SourceId::remove` panics on already-fired ids).
         pub controls_generation: Cell<u64>,
+        /// Bumped whenever the position ticker must be cancelled/replaced.
+        pub position_generation: Cell<u64>,
+        /// Guards the seek-scale sync: true while the ticker writes the
+        /// position programmatically (so user-seek handlers can tell them
+        /// apart).
+        pub scrub_syncing: Cell<bool>,
         /// Bumped on every grid (re)fill; stale chunk fillers no-op.
         pub fill_generation: Cell<u64>,
         /// Bumped on every open_details; stale async detail fillers no-op
@@ -211,6 +236,9 @@ impl Window {
             .build();
 
         let _ = window.imp().catalog.set(sample::Catalog::load());
+        // Alt-tab shows the toplevel title; with a header bar title
+        // widget GTK would otherwise fall back to the app id.
+        window.set_title(Some("RTV"));
         window.setup_actions();
         window.setup_browse();
         window.imp().selected_category.set(-1);
@@ -279,6 +307,7 @@ impl Window {
             imp.has_source.set(false);
             imp.favorites.borrow_mut().clear();
             *imp.current.borrow_mut() = None;
+            win.stop_pipeline();
             win.rebuild_favorites();
             imp.main_view.pop_to_page(&*imp.welcome_page);
         });
@@ -304,7 +333,7 @@ impl Window {
         seek_back.connect_activate(move |_, _| {
             let Some(win) = win.upgrade() else { return };
             if win.imp().on_player.get() {
-                win.toast("Seek back 10s (mock)");
+                win.seek_relative(-10);
             }
         });
         self.add_action(&seek_back);
@@ -314,7 +343,7 @@ impl Window {
         seek_forward.connect_activate(move |_, _| {
             let Some(win) = win.upgrade() else { return };
             if win.imp().on_player.get() {
-                win.toast("Seek forward 10s (mock)");
+                win.seek_relative(10);
             }
         });
         self.add_action(&seek_forward);
@@ -372,6 +401,11 @@ impl Window {
 
     fn setup_browse(&self) {
         let imp = self.imp();
+
+        // Restore the persisted volume into the slider (and the schema
+        // default is 1.0 — full). New pipelines pick it up from the scale.
+        let settings = gio::Settings::new("io.github.tunix.rtv");
+        imp.volume_scale.set_value(settings.double("volume"));
 
         // Source picker, valhalla-style, in the header title area. Switching
         // is silent for now; real per-source loading arrives with the
@@ -478,7 +512,8 @@ impl Window {
         });
 
         // When the player or the episodes page pops off, their state is
-        // gone; the episodes page drops its (cover-fetching) children.
+        // gone; the player tears down any real pipeline, the episodes
+        // page drops its (cover-fetching) children.
         let win = self.downgrade();
         imp.main_view.connect_popped(move |_, popped_page| {
             let Some(win) = win.upgrade() else { return };
@@ -486,6 +521,7 @@ impl Window {
             if popped_page == &*i.player_page {
                 i.on_player.set(false);
                 win.cancel_hide();
+                win.stop_pipeline();
             }
             if popped_page == &*i.episodes_page {
                 while let Some(child) = i.episodes_content.first_child() {
@@ -504,13 +540,13 @@ impl Window {
         let win = self.downgrade();
         imp.seek_back.connect_clicked(move |_| {
             if let Some(win) = win.upgrade() {
-                win.toast("Seek back 10s (mock)");
+                win.seek_relative(-10);
             }
         });
         let win = self.downgrade();
         imp.seek_forward.connect_clicked(move |_| {
             if let Some(win) = win.upgrade() {
-                win.toast("Seek forward 10s (mock)");
+                win.seek_relative(10);
             }
         });
         let win = self.downgrade();
@@ -518,6 +554,32 @@ impl Window {
             if let Some(win) = win.upgrade() {
                 win.toggle_mute();
             }
+        });
+        // Real pipelines take the volume directly from the slider, and
+        // the level persists across sessions via GSettings.
+        let win = self.downgrade();
+        imp.volume_scale.connect_value_changed(move |scale| {
+            if let Some(win) = win.upgrade() {
+                let level = scale.value();
+                let i = win.imp();
+                if let Some(pipeline) = i.pipeline.borrow().as_ref() {
+                    pipeline.set_property("volume", level);
+                }
+                let settings = gio::Settings::new("io.github.tunix.rtv");
+                settings
+                    .set_double("volume", level)
+                    .expect("write volume setting");
+            }
+        });
+        // The scrubber seeks the real pipeline when the user drags or
+        // clicks it. The ticker's programmatic updates don't emit
+        // change_value, so there is no feedback loop.
+        let win = self.downgrade();
+        imp.seek_scale.connect_change_value(move |_, _, value| {
+            if let Some(win) = win.upgrade() {
+                win.seek_to(value as u64);
+            }
+            glib::Propagation::Proceed
         });
         let win = self.downgrade();
         imp.fullscreen_button.connect_clicked(move |_| {
@@ -600,7 +662,7 @@ impl Window {
             });
             i.player_headerbar.set_visible(!fullscreen);
             i.content_info_row.set_visible(!fullscreen);
-            i.live_badge.set_visible(!fullscreen);
+            i.live_badge.set_visible(!fullscreen && i.is_live.get());
             let margin = if fullscreen { 0 } else { 12 };
             i.player_content.set_margin_start(margin);
             i.player_content.set_margin_end(margin);
@@ -1085,7 +1147,7 @@ impl Window {
             Kind::Vod => "Movie · 1080p",
             Kind::Series => "Series",
         };
-        self.play_with_status(kind, id, name, status);
+        self.play_with_status(kind, id, name, name, status);
     }
 
     /// Playing an episode keeps the HEART on the parent series: the
@@ -1098,30 +1160,326 @@ impl Window {
         episode_number: i64,
         episode_title: &str,
     ) {
+        // The favorite target stays the SERIES; the player page names
+        // the episode and the status line locates it in the series.
         self.play_with_status(
             Kind::Series,
             series_id,
+            series_name,
             episode_title,
-            &format!("{series_name} · Season {season} · Episode {episode_number}"),
+            &format!("Episode · {series_name} · Season {season} · E{episode_number}"),
         );
     }
 
-    fn play_with_status(&self, kind: Kind, id: i64, name: &str, status: &str) {
+    fn play_with_status(
+        &self,
+        kind: Kind,
+        id: i64,
+        content_name: &str,
+        display_title: &str,
+        status: &str,
+    ) {
         let imp = self.imp();
+        // The favorite target is the CONTENT (series/movie/channel); the
+        // player title may name an episode or trailer within it.
         *imp.current.borrow_mut() = Some(FavKey {
             kind,
             id,
-            name: name.to_string(),
+            name: content_name.to_string(),
         });
         *imp.current_status.borrow_mut() = status.to_string();
-        imp.player_page.set_title(name);
-        imp.content_title.set_label(name);
+        imp.player_page.set_title(display_title);
+        imp.content_title.set_label(display_title);
         imp.content_status.set_label(status);
         imp.playing.set(false);
         self.set_play_icon(false);
+        // The LIVE badge is for live TV only.
+        imp.is_live.set(kind == Kind::Live);
+        imp.live_badge.set_visible(kind == Kind::Live);
         set_heart_active(&imp.player_heart, self.is_fav(kind, id));
         imp.on_player.set(true);
         imp.main_view.push(&*imp.player_page);
+        self.show_controls();
+    }
+
+    /// Trailers are the first real-playback step: playable video URLs run
+    /// through GStreamer inside the player page; YouTube links still need
+    /// a video backend and keep the demo player.
+    fn play_trailer(
+        &self,
+        kind: Kind,
+        id: i64,
+        content_name: &str,
+        label: &str,
+        url: Option<String>,
+    ) {
+        self.play_with_status(
+            kind,
+            id,
+            content_name,
+            &format!("{content_name} — {label}"),
+            "Trailer",
+        );
+        let Some(url) = url else { return };
+        if url.contains("youtube.com") || url.contains("youtu.be") {
+            self.toast("YouTube trailer playback arrives with the video backend — the demo player shows for now");
+            return;
+        }
+        if self.start_playback(&url) {
+            self.imp().playing.set(true);
+            self.set_play_icon(true);
+        } else {
+            self.toast("Real playback is unavailable here — the demo player shows instead");
+        }
+    }
+
+    /// Start real playback for `uri` with GStreamer's playbin, rendering
+    /// into the player page via the GTK4 paintable sink when available.
+    /// Returns whether real playback actually started.
+    fn start_playback(&self, uri: &str) -> bool {
+        let imp = self.imp();
+        self.stop_pipeline();
+
+        if gstreamer::init().is_err() {
+            return false;
+        }
+        let Ok(playbin) = gstreamer::ElementFactory::make("playbin").build() else {
+            return false;
+        };
+        let mut video = false;
+        // The GTK4 paintable sink renders into our own page; without it
+        // (older runtimes, headless GL) the audio still plays while the
+        // demo surface stays up.
+        if let Ok(sink) = gstreamer::ElementFactory::make("gtk4paintablesink").build() {
+            let paintable = sink.property::<Option<gtk::gdk::Paintable>>("paintable");
+            if let Some(paintable) = paintable {
+                imp.video_surface.set_paintable(Some(&paintable));
+                video = true;
+                playbin.set_property("video-sink", &sink);
+            }
+        }
+        if !video {
+            if let Ok(fake) = gstreamer::ElementFactory::make("fakesink").build() {
+                playbin.set_property("video-sink", &fake);
+            }
+        }
+        playbin.set_property("uri", uri);
+        playbin.set_property("volume", imp.volume_scale.value());
+        playbin.set_property("mute", imp.muted.get());
+
+        let playing = playbin.set_state(gstreamer::State::Playing).is_ok();
+        if !playing {
+            let _ = playbin.set_state(gstreamer::State::Null);
+            return false;
+        }
+
+        // Bus events (EOS, errors) are drained on the main loop; the
+        // poller stops itself once the pipeline is torn down. A failing
+        // video sink (headless GL, old runtimes) is retried once without
+        // it — audio keeps playing on the demo surface.
+        if playbin.bus().is_some() {
+            let win = self.downgrade();
+            let retried = Rc::new(std::cell::Cell::new(false));
+            glib::timeout_add_local(std::time::Duration::from_millis(300), move || {
+                let Some(win) = win.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                let Some(pipeline) = win.imp().pipeline.borrow().as_ref().cloned() else {
+                    return glib::ControlFlow::Break;
+                };
+                let Some(bus) = pipeline.bus() else {
+                    return glib::ControlFlow::Break;
+                };
+                let mut stop = false;
+                let mut missing_codec = false;
+                while let Some(message) = bus.timed_pop(gstreamer::ClockTime::from_seconds(0)) {
+                    match message.view() {
+                        gstreamer::MessageView::Eos(..) => stop = true,
+                        gstreamer::MessageView::Element(elem) => {
+                            // gst-plugins-base reports undecodable streams
+                            // as "missing-plugin" element messages; playbin
+                            // keeps running with the audio — surface it
+                            // once instead of stopping the playback.
+                            if elem
+                                .structure()
+                                .map(|s| s.name() == "missing-plugin")
+                                .unwrap_or(false)
+                                && !missing_codec
+                            {
+                                missing_codec = true;
+                                win.toast(
+                                    "Missing codec — video unavailable; install GStreamer decoders (e.g. RPM Fusion gstreamer1-libav)",
+                                );
+                            }
+                        }
+                        gstreamer::MessageView::Error(err) => {
+                            let _ = err;
+                            if missing_codec || retried.get() {
+                                win.toast(
+                                    "Missing codec for this stream — install GStreamer decoders (e.g. RPM Fusion gstreamer1-libav)",
+                                );
+                                stop = true;
+                            } else {
+                                retried.set(true);
+                                let _ = pipeline.set_state(gstreamer::State::Null);
+                                if let Ok(fake) =
+                                    gstreamer::ElementFactory::make("fakesink").build()
+                                {
+                                    pipeline.set_property("video-sink", &fake);
+                                }
+                                let i = win.imp();
+                                i.video_surface.set_paintable(None::<&gtk::gdk::Paintable>);
+                                i.video_surface.set_visible(false);
+                                i.app_watermark.set_visible(true);
+                                if pipeline.set_state(gstreamer::State::Playing).is_ok() {
+                                    win.toast("Video sink unavailable — playing audio only");
+                                    continue;
+                                }
+                                stop = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if stop {
+                    win.stop_pipeline();
+                    glib::ControlFlow::Break
+                } else {
+                    glib::ControlFlow::Continue
+                }
+            });
+        }
+
+        imp.pipeline.replace(Some(playbin));
+        imp.video_surface.set_visible(video);
+        imp.app_watermark.set_visible(!video);
+        if video {
+            self.start_position_ticker();
+        }
+        video
+    }
+
+    /// Start the position ticker: every 500 ms it queries the pipeline's
+    /// position/duration, feeds the scrub bar and the time labels, and
+    /// stops itself when playback pauses/stops or the page pops. The
+    /// generation counter cancels stale tickers without touching
+    /// already-fired source ids.
+    fn start_position_ticker(&self) {
+        let imp = self.imp();
+        let generation = imp.position_generation.get() + 1;
+        imp.position_generation.set(generation);
+        let win = self.downgrade();
+        glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+            let Some(win) = win.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let i = win.imp();
+            if i.position_generation.get() != generation {
+                return glib::ControlFlow::Break;
+            }
+            let Some(pipeline) = i.pipeline.borrow().as_ref().cloned() else {
+                return glib::ControlFlow::Break;
+            };
+            let position = pipeline
+                .query_position::<gstreamer::ClockTime>()
+                .map(|t| t.seconds());
+            let duration = pipeline
+                .query_duration::<gstreamer::ClockTime>()
+                .map(|t| t.seconds());
+            match (position, duration) {
+                (Some(pos), Some(dur)) if dur > 0 => {
+                    i.scrub_row.set_visible(true);
+                    let adj = i.seek_scale.adjustment();
+                    if (adj.upper() as u64) != dur {
+                        adj.set_upper(dur as f64);
+                    }
+                    i.scrub_syncing.set(true);
+                    i.seek_scale.set_value(pos as f64);
+                    i.scrub_syncing.set(false);
+                    i.elapsed_label.set_text(&fmt_clock(pos));
+                    i.duration_label.set_text(&fmt_clock(dur));
+                }
+                _ => {
+                    // Live stream (no duration): the scrubber is
+                    // meaningless, keep it hidden.
+                    i.scrub_row.set_visible(false);
+                }
+            }
+            if i.on_player.get() && i.playing.get() {
+                glib::ControlFlow::Continue
+            } else {
+                glib::ControlFlow::Break
+            }
+        });
+    }
+
+    /// Tear down any active pipeline and return the player to the demo
+    /// surface. Safe to call when nothing is playing.
+    fn stop_pipeline(&self) {
+        let imp = self.imp();
+        imp.position_generation
+            .set(imp.position_generation.get() + 1);
+        if let Some(pipeline) = imp.pipeline.take() {
+            let _ = pipeline.set_state(gstreamer::State::Null);
+            if let Some(bus) = pipeline.bus() {
+                bus.remove_signal_watch();
+            }
+        }
+        imp.video_surface
+            .set_paintable(None::<&gtk::gdk::Paintable>);
+        imp.video_surface.set_visible(false);
+        imp.app_watermark.set_visible(true);
+        imp.scrub_row.set_visible(false);
+        imp.seek_scale.set_value(0.0);
+        imp.elapsed_label.set_text("0:00");
+        if imp.playing.get() {
+            imp.playing.set(false);
+            self.set_play_icon(false);
+        }
+    }
+
+    /// Seek the real pipeline to `seconds`; no-op on the demo player.
+    fn seek_to(&self, seconds: u64) {
+        let pipeline = self.imp().pipeline.borrow().as_ref().cloned();
+        let Some(pipeline) = pipeline else {
+            return;
+        };
+        let _ = pipeline.seek_simple(
+            gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::KEY_UNIT,
+            gstreamer::ClockTime::from_seconds(seconds),
+        );
+    }
+
+    /// Seek the real pipeline by `delta` seconds; a no-op toast on the
+    /// demo player.
+    fn seek_relative(&self, delta: i64) {
+        if self.imp().pipeline.borrow().is_none() {
+            self.toast("Seek 10s (demo)");
+            return;
+        }
+        let pipeline = self.imp().pipeline.borrow().as_ref().cloned();
+        let Some(pipeline) = pipeline else {
+            return;
+        };
+        let position = pipeline.query_position::<gstreamer::ClockTime>();
+        let duration = pipeline.query_duration::<gstreamer::ClockTime>();
+        let (Some(position), Some(duration)) = (position, duration) else {
+            self.toast("Seeking is not available for this stream");
+            return;
+        };
+        let target = if delta >= 0 {
+            (position + gstreamer::ClockTime::from_seconds(delta as u64)).min(duration)
+        } else {
+            position.saturating_sub(gstreamer::ClockTime::from_seconds(delta.unsigned_abs()))
+        };
+        let _ = pipeline.seek(
+            1.0,
+            gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::KEY_UNIT,
+            gstreamer::SeekType::Set,
+            target,
+            gstreamer::SeekType::Set,
+            duration,
+        );
         self.show_controls();
     }
 
@@ -1186,23 +1544,41 @@ impl Window {
         let (header, _) = detail_header(name, ctx.cover.as_deref(), &series_meta_lines(&meta));
         imp.detail_content.append(&header);
 
-        // Rating-source chips sit right below the "künye" (cover +
-        // metadata block).
-        imp.detail_content.append(&source_chips_row(
-            name,
-            meta.rating.as_deref().filter(|r| *r != "0"),
-        ));
+        // Rating-source chips sit right below the künye (cover + metadata
+        // block). The IMDb score arrives from the live ratings lookup;
+        // until then the chip shows a small placeholder.
+        let (chips_row, chips) = source_chips_row(name);
+        imp.detail_content.append(&chips_row);
 
-        if let Some(plot) = &meta.plot {
-            imp.detail_content.append(&plot_label(plot));
-        }
-
+        let win = self.downgrade();
+        let panel_rating = meta.rating.clone().filter(|r| r != "0");
+        let year = meta
+            .release_date
+            .as_deref()
+            .map(|d| &d[..4])
+            .map(str::to_string);
         // Trailers get their own section above Seasons: a series can carry
-        // several of them (even one per season).
+        // several of them (even one per season). Their thumbnails pick up
+        // the title's backdrop artwork from the metadata lookup.
         let trailers: Vec<String> = meta.trailer.clone().into_iter().collect();
-        if let Some(section) = trailers_section(self, Kind::Series, id, name, &trailers) {
-            imp.detail_content.append(&section);
+        let trailer_section = trailers_section(self, Kind::Series, id, name, &trailers);
+        if let Some(section) = &trailer_section {
+            imp.detail_content.append(&section.widget);
         }
+        crate::ratings::lookup(Kind::Series, name, year.as_deref(), move |ratings| {
+            let Some(win) = win.upgrade() else {
+                return;
+            };
+            if win.imp().details_generation.get() != generation {
+                return;
+            }
+            chips.apply(ratings.as_ref(), panel_rating.as_deref());
+            if let Some(ratings) = &ratings {
+                if let Some(section) = &trailer_section {
+                    section.apply_artwork(ratings.backdrop.as_deref());
+                }
+            }
+        });
 
         imp.detail_content.append(&section_title("Seasons"));
         let seasons_box = gtk::Box::builder()
@@ -1269,7 +1645,7 @@ impl Window {
                 .margin_end(12)
                 .build();
             if let Some(cover) = &season.cover {
-                row_box.prepend(&cover_art(Some(cover), 34, 51));
+                row_box.prepend(&cover_art(Some(cover), 40, 60));
             }
             row_box.append(
                 &gtk::Label::builder()
@@ -1339,11 +1715,16 @@ impl Window {
             &series_meta_lines(&ctx.meta),
         );
         imp.episodes_content.append(&header);
-        if let Some(plot) = &ctx.meta.plot {
-            imp.episodes_content.append(&plot_label(plot));
-        }
-        imp.episodes_content
-            .append(&section_title(&format!("Season {season_number}")));
+        // Some breathing room before the season heading, like the Play
+        // pill on the movie page.
+        imp.episodes_content.append(
+            &gtk::Label::builder()
+                .label(format!("Season {season_number}"))
+                .halign(gtk::Align::Start)
+                .margin_top(12)
+                .css_classes(["title-3"])
+                .build(),
+        );
 
         let episodes = info
             .episodes
@@ -1393,12 +1774,12 @@ impl Window {
     /// Movie body, laid out like the series page: cover with the Key:
     /// value details to its right, rating-source chips below the künye,
     /// a prominent Play button, then trailers (when present). The plot
-    /// renders as the last künye line, under Duration.
+    /// renders as the last künye line ("Plot"), under Duration.
     fn open_vod_details(
         &self,
         id: i64,
         name: &str,
-        rating: Option<String>,
+        panel_rating: Option<String>,
         cover: Option<&str>,
         generation: u64,
     ) {
@@ -1408,15 +1789,41 @@ impl Window {
         info_col.append(&spinner());
 
         // Rating-source chips sit right below the künye, above Play; the
-        // IMDb chip carries the panel's rating.
-        imp.detail_content.append(&source_chips_row(
-            name,
-            rating.as_deref().filter(|r| *r != "0"),
-        ));
+        // ratings lookup refines the IMDb link and score in place, with
+        // the panel's rating as the offline fallback. The trailers section
+        // arrives with the async vod info, so the section and the looked
+        // up backdrop are shared through slots to connect them.
+        let (chips_row, chips) = source_chips_row(name);
+        imp.detail_content.append(&chips_row);
+        let trailer_section: Rc<RefCell<Option<TrailerSection>>> = Rc::new(RefCell::new(None));
+        let backdrop: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let win = self.downgrade();
+        let panel_rating = panel_rating.filter(|r| r != "0");
+        crate::ratings::lookup(Kind::Vod, name, None, {
+            let trailer_section = trailer_section.clone();
+            let backdrop = backdrop.clone();
+            move |ratings| {
+                let Some(win) = win.upgrade() else {
+                    return;
+                };
+                if win.imp().details_generation.get() != generation {
+                    return;
+                }
+                chips.apply(ratings.as_ref(), panel_rating.as_deref());
+                if let Some(ratings) = &ratings {
+                    *backdrop.borrow_mut() = ratings.backdrop.clone();
+                    if let Some(section) = &*trailer_section.borrow() {
+                        section.apply_artwork(ratings.backdrop.as_deref());
+                    }
+                }
+            }
+        });
 
+        // A little distance from the künye/chips block.
         let play = gtk::Button::builder()
             .label("Play")
             .halign(gtk::Align::Center)
+            .margin_top(18)
             .css_classes(["suggested-action", "pill"])
             .build();
         let win = self.downgrade();
@@ -1431,6 +1838,8 @@ impl Window {
         let win = self.downgrade();
         let info_col = info_col.clone();
         let title = name.to_string();
+        let trailer_section = trailer_section.clone();
+        let backdrop = backdrop.clone();
         details::vod_info(id, move |result| {
             let Some(win) = win.upgrade() else {
                 return;
@@ -1439,19 +1848,23 @@ impl Window {
             if i.details_generation.get() != generation {
                 return;
             }
-            win.fill_vod_details(id, &title, &info_col, result);
+            win.fill_vod_details(id, &title, &info_col, result, &trailer_section, &backdrop);
         });
     }
 
     /// Fill the movie header's info column with the fetched Key: value
     /// details (the plot is the last line, under Duration) and add the
-    /// trailers section when the panel carries one.
+    /// trailers section when the panel carries one. The shared slots let
+    /// a metadata backdrop that arrived earlier (or later) reach the
+    /// section either way.
     fn fill_vod_details(
         &self,
         id: i64,
         name: &str,
         info_col: &gtk::Box,
         result: Option<details::VodInfo>,
+        trailer_section: &Rc<RefCell<Option<TrailerSection>>>,
+        backdrop: &Rc<RefCell<Option<String>>>,
     ) {
         let imp = self.imp();
         while let Some(child) = info_col.first_child() {
@@ -1471,7 +1884,7 @@ impl Window {
             info.cast.map(|v| ("Cast", v)),
             info.director.map(|v| ("Director", v)),
             info.duration.map(|v| ("Duration", format_duration(&v))),
-            info.plot.map(|v| ("Description", v)),
+            info.plot.map(|v| ("Plot", v)),
         ]
         .into_iter()
         .flatten()
@@ -1479,20 +1892,38 @@ impl Window {
             info_col.append(&kv_line(key, &value));
         }
 
-        // Trailers play in-app like the series ones.
+        // Trailers play in-app like the series ones; any backdrop the
+        // metadata lookup already delivered fills the thumbnails at once.
         let trailers: Vec<String> = info.trailer.into_iter().collect();
-        if let Some(section) = trailers_section(self, Kind::Vod, id, name, &trailers) {
-            imp.detail_content.append(&section);
+        let section = trailers_section(self, Kind::Vod, id, name, &trailers);
+        if let Some(section) = &section {
+            imp.detail_content.append(&section.widget);
+            section.apply_artwork(backdrop.borrow().as_deref());
         }
+        *trailer_section.borrow_mut() = section;
     }
 
     fn toggle_playing(&self) {
         let imp = self.imp();
+        // Real pipeline: pause/resume the stream.
+        if let Some(pipeline) = imp.pipeline.borrow().as_ref() {
+            let target = if imp.playing.get() {
+                gstreamer::State::Paused
+            } else {
+                gstreamer::State::Playing
+            };
+            let _ = pipeline.set_state(target);
+            imp.playing.set(!imp.playing.get());
+            self.set_play_icon(imp.playing.get());
+            self.show_controls();
+            return;
+        }
+        // Demo player (no real stream attached).
         imp.playing.set(!imp.playing.get());
         self.set_play_icon(imp.playing.get());
         let status = imp.current_status.borrow().clone();
         imp.content_status.set_label(if imp.playing.get() {
-            "Playing (mock)"
+            "Playing (demo)"
         } else {
             &status
         });
@@ -1523,7 +1954,7 @@ impl Window {
         imp.controls_generation.set(generation);
         imp.controls_revealer.set_reveal_child(true);
         if self.is_fullscreen() {
-            imp.live_badge.set_visible(true);
+            imp.live_badge.set_visible(imp.is_live.get());
         }
         if imp.playing.get() && imp.on_player.get() {
             let win = self.downgrade();
@@ -1557,6 +1988,9 @@ impl Window {
         } else {
             "audio-volume-high-symbolic"
         });
+        if let Some(pipeline) = imp.pipeline.borrow().as_ref() {
+            pipeline.set_property("mute", imp.muted.get());
+        }
     }
 
     fn toggle_fullscreen(&self) {
@@ -1619,9 +2053,8 @@ fn kv_line(key: &str, value: &str) -> gtk::Label {
         .build()
 }
 
-/// The shared series header lines: Genre, Released, Cast, Director and
-/// episode length. The IMDb rating lives in the source chip below the
-/// header, so it is not repeated here.
+/// The shared series header lines: Genre, Released, Cast, Director,
+/// episode length and Plot — identical structure to the movie künye.
 fn series_meta_lines(meta: &SeriesMeta) -> Vec<Option<(String, String)>> {
     [
         meta.genre.clone().map(|v| ("Genre".to_string(), v)),
@@ -1633,9 +2066,25 @@ fn series_meta_lines(meta: &SeriesMeta) -> Vec<Option<(String, String)>> {
         meta.episode_run_time
             .clone()
             .map(|v| ("Episode length".to_string(), format!("~{v} min"))),
+        meta.plot.clone().map(|v| ("Plot".to_string(), v)),
     ]
     .into_iter()
     .collect()
+}
+
+/// The trailers section plus the thumbnail handles, so the metadata
+/// lookup can hand the rows their artwork afterwards.
+struct TrailerSection {
+    widget: gtk::Box,
+    thumbs: Vec<Rc<ImageCard>>,
+}
+
+impl TrailerSection {
+    fn apply_artwork(&self, backdrop: Option<&str>) {
+        for thumb in &self.thumbs {
+            thumb.load(backdrop);
+        }
+    }
 }
 
 /// Trailers listed as rows with a thumbnail; activating one plays it in
@@ -1647,7 +2096,7 @@ fn trailers_section(
     id: i64,
     title: &str,
     trailers: &[String],
-) -> Option<gtk::Box> {
+) -> Option<TrailerSection> {
     if trailers.is_empty() {
         return None;
     }
@@ -1662,7 +2111,8 @@ fn trailers_section(
         .activate_on_single_click(true)
         .css_classes(["boxed-list"])
         .build();
-    let mut titles = Vec::new();
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut thumbs: Vec<Rc<ImageCard>> = Vec::new();
     for (index, trailer) in trailers.iter().enumerate() {
         let row = adw::ActionRow::new();
         let row_box = gtk::Box::builder()
@@ -1672,9 +2122,10 @@ fn trailers_section(
             .margin_start(12)
             .margin_end(12)
             .build();
-        // Placeholder with a centered play chip when no thumbnail loads;
-        // once it does, the play chip is revealed on hover instead.
-        row_box.append(&trailer_thumb(youtube_thumb(trailer).as_deref()));
+        // Placeholder with a centered play chip; the metadata lookup
+        // fills the row with the title's backdrop artwork afterwards.
+        let thumb = trailer_thumb(64, 36);
+        row_box.append(&thumb.widget);
         row_box.append(
             &gtk::Label::builder()
                 .label(if trailers.len() == 1 {
@@ -1691,61 +2142,54 @@ fn trailers_section(
         // GtkListBox with selection NONE marks its rows inert.
         row.set_activatable(true);
         list.append(&row);
+        thumbs.push(thumb.clone());
 
         // The playback heart keeps favoriting the movie/series itself.
-        titles.push(format!("{title} — Trailer {}", index + 1));
+        entries.push((format!("Trailer {}", index + 1), trailer.clone()));
     }
     // Routed via the list's row-activated signal (same mechanism as the
     // sidebar; per-row signals miss inert selection-NONE rows).
+    let content_title = title.to_string();
     let win = win.downgrade();
-    let titles = titles;
     list.connect_row_activated(move |_, row| {
-        let Some(activate_title) = titles.get(row.index() as usize) else {
+        let Some((label, url)) = entries.get(row.index() as usize) else {
             return;
         };
         if let Some(win) = win.upgrade() {
-            win.play_with_status(kind, id, activate_title, "Trailer");
+            win.play_trailer(kind, id, &content_title, label, Some(url.clone()));
         }
     });
     section.append(&list);
-    Some(section)
+    Some(TrailerSection {
+        widget: section,
+        thumbs,
+    })
 }
 
-/// Thumbnail URL for a YouTube trailer link (mqdefault); mock ids do not
-/// resolve, and the cover placeholder covers that gracefully.
-fn youtube_thumb(url: &str) -> Option<String> {
-    let id = url
-        .split('?')
-        .nth(1)
-        .and_then(|query| {
-            query
-                .split('&')
-                .find_map(|pair| pair.strip_prefix("v=").map(str::to_string))
-        })
-        .or_else(|| {
-            url.split("youtu.be/")
-                .nth(1)
-                .and_then(|rest| rest.split(['?', '/']).next().map(str::to_string))
-        })?;
-    (!id.is_empty()).then(|| format!("https://img.youtube.com/vi/{id}/mqdefault.jpg"))
+/// Seconds → "M:SS" / "H:MM:SS" for the scrubber labels.
+fn fmt_clock(total: u64) -> String {
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let seconds = total % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
 }
 
 /// Cover art box with placeholder + async picture fill (same mechanics as
 /// the content cards). Falls back to the placeholder on any failure. Once
 /// a real image is loaded, clicking it opens a full-size preview popup.
 fn cover_art(url: Option<&str>, width: i32, height: i32) -> gtk::Overlay {
-    image_card(
-        url,
-        width,
-        height,
-        Some(("video-display-symbolic", 40)),
-        None,
-    )
+    let card = ImageCard::new(width, height, Some(("video-display-symbolic", 40)), None);
+    card.load(url);
+    card.widget.clone()
 }
 
 /// Trailer thumbnail: a centered play chip acts as the placeholder; once
-/// the YouTube thumb loads, the play chip is only revealed on hover.
-fn trailer_thumb(url: Option<&str>) -> gtk::Overlay {
+/// the artwork loads, the play chip is only revealed on hover.
+fn trailer_thumb(width: i32, height: i32) -> Rc<ImageCard> {
     let play = gtk::Image::builder()
         .icon_name("media-playback-start-symbolic")
         .pixel_size(20)
@@ -1753,89 +2197,114 @@ fn trailer_thumb(url: Option<&str>) -> gtk::Overlay {
         .valign(gtk::Align::Center)
         .css_classes(["play-chip"])
         .build();
-    image_card(url, 64, 36, None, Some(play))
+    Rc::new(ImageCard::new(width, height, None, Some(play)))
 }
 
 /// Image card shared by every thumbnail on the detail pages: a rounded
 /// `.card` tile, an optional placeholder icon, an optional image that
 /// fades in on load and an optional overlay image revealed by CSS on row
 /// hover. A loaded image gets the pointer cursor and opens the preview
-/// popup on click; failures keep the placeholder (never crash).
-fn image_card(
-    url: Option<&str>,
-    width: i32,
-    height: i32,
-    placeholder: Option<(&str, i32)>,
+/// popup on click; failures keep the placeholder (never crash). The image
+/// can also be (re)loaded after construction — trailer rows start with a
+/// placeholder and pick up their artwork from the metadata lookup.
+struct ImageCard {
+    widget: gtk::Overlay,
+    picture: gtk::Picture,
     hover_reveal: Option<gtk::Image>,
-) -> gtk::Overlay {
-    let art = gtk::Box::builder()
-        .css_classes(["card"])
-        .width_request(width)
-        .height_request(height)
-        .valign(gtk::Align::Start)
-        .build();
-    let overlay = gtk::Overlay::new();
-    overlay.set_child(Some(&art));
+    loaded: Rc<RefCell<Option<gtk::gdk::Texture>>>,
+}
 
-    if let Some((icon, pixel)) = placeholder {
-        overlay.add_overlay(
-            &gtk::Image::builder()
-                .icon_name(icon)
-                .pixel_size(pixel)
-                .halign(gtk::Align::Center)
-                .valign(gtk::Align::Center)
-                .build(),
-        );
+impl ImageCard {
+    fn new(
+        width: i32,
+        height: i32,
+        placeholder: Option<(&str, i32)>,
+        hover_reveal: Option<gtk::Image>,
+    ) -> Self {
+        let art = gtk::Box::builder()
+            .css_classes(["card"])
+            .width_request(width)
+            .height_request(height)
+            .valign(gtk::Align::Start)
+            .build();
+        let widget = gtk::Overlay::new();
+        widget.set_child(Some(&art));
+        // Clip every layer (picture, placeholders, chips) to the rounded
+        // card, so loaded images never poke past the frame corners.
+        widget.set_overflow(gtk::Overflow::Hidden);
+
+        if let Some((icon, pixel)) = placeholder {
+            widget.add_overlay(
+                &gtk::Image::builder()
+                    .icon_name(icon)
+                    .pixel_size(pixel)
+                    .halign(gtk::Align::Center)
+                    .valign(gtk::Align::Center)
+                    .build(),
+            );
+        }
+
+        let picture = gtk::Picture::builder()
+            .content_fit(gtk::ContentFit::Cover)
+            .width_request(width)
+            .height_request(height)
+            .visible(false)
+            .build();
+        widget.add_overlay(&picture);
+        if let Some(hover) = &hover_reveal {
+            widget.add_overlay(hover);
+        }
+
+        let loaded: Rc<RefCell<Option<gtk::gdk::Texture>>> = std::rc::Rc::new(RefCell::new(None));
+        let click = gtk::GestureClick::new();
+        // Capture phase + explicit claim: the click belongs to the
+        // preview — it must not ALSO activate the surrounding list row.
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        click.connect_pressed({
+            let loaded = loaded.clone();
+            let widget = widget.clone();
+            move |gesture, _, _, _| {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                if let Some(texture) = loaded.borrow().as_ref() {
+                    open_preview(&widget, texture);
+                }
+            }
+        });
+        widget.add_controller(click);
+
+        Self {
+            widget,
+            picture,
+            hover_reveal,
+            loaded,
+        }
     }
 
-    let picture = gtk::Picture::builder()
-        .content_fit(gtk::ContentFit::Cover)
-        .width_request(width)
-        .height_request(height)
-        .visible(false)
-        .build();
-    overlay.add_overlay(&picture);
-    if let Some(hover) = &hover_reveal {
-        overlay.add_overlay(hover);
-    }
-
-    let loaded = std::rc::Rc::new(RefCell::new(None::<gtk::gdk::Texture>));
-    if let Some(url) = url {
-        let loaded = loaded.clone();
-        crate::covers::fetch(url.to_string(), {
-            let picture = picture.clone();
-            let overlay = overlay.clone();
-            move |path| {
-                if let Some(path) = path {
-                    if let Ok(texture) = gtk::gdk::Texture::from_filename(&path) {
-                        loaded.replace(Some(texture.clone()));
-                        picture.set_paintable(Some(&texture));
-                        picture.set_visible(true);
-                        if let Some(hover) = &hover_reveal {
-                            hover.add_css_class("hover-reveal");
-                        }
-                        if let Some(cursor) = gtk::gdk::Cursor::from_name("pointer", None) {
-                            overlay.set_cursor(Some(&cursor));
-                        }
+    /// Fetch `url` into the card; failures keep the placeholder.
+    fn load(&self, url: Option<&str>) {
+        let Some(url) = url else {
+            return;
+        };
+        let picture = self.picture.clone();
+        let hover_reveal = self.hover_reveal.clone();
+        let loaded = self.loaded.clone();
+        let widget = self.widget.clone();
+        crate::covers::fetch(url.to_string(), move |path| {
+            if let Some(path) = path {
+                if let Ok(texture) = gtk::gdk::Texture::from_filename(&path) {
+                    loaded.replace(Some(texture.clone()));
+                    picture.set_paintable(Some(&texture));
+                    picture.set_visible(true);
+                    if let Some(hover) = &hover_reveal {
+                        hover.add_css_class("hover-reveal");
+                    }
+                    if let Some(cursor) = gtk::gdk::Cursor::from_name("pointer", None) {
+                        widget.set_cursor(Some(&cursor));
                     }
                 }
             }
         });
     }
-
-    let click = gtk::GestureClick::new();
-    click.connect_pressed({
-        let loaded = loaded.clone();
-        let overlay = overlay.clone();
-        move |_, _, _, _| {
-            if let Some(texture) = loaded.borrow().as_ref() {
-                open_preview(&overlay, texture);
-            }
-        }
-    });
-    overlay.add_controller(click);
-
-    overlay
 }
 
 /// Full-size image preview popup, sized to the image's aspect ratio and
@@ -1931,16 +2400,6 @@ fn spinner() -> gtk::Spinner {
         .build()
 }
 
-fn plot_label(text: &str) -> gtk::Label {
-    gtk::Label::builder()
-        .label(text)
-        .wrap(true)
-        .wrap_mode(gtk::pango::WrapMode::WordChar)
-        .xalign(0.0)
-        .halign(gtk::Align::Start)
-        .build()
-}
-
 fn dim_label(text: &str) -> gtk::Label {
     gtk::Label::builder()
         .label(text)
@@ -1961,36 +2420,98 @@ fn section_title(text: &str) -> gtk::Label {
         .build()
 }
 
+/// The updatable parts of the source chips row: the IMDb chip's score
+/// label and its URL (upgraded to the exact title page once the ratings
+/// lookup resolves the IMDb id). The Rotten Tomatoes and Wikipedia chips
+/// are link-only.
+struct SourceChips {
+    imdb_score: gtk::Label,
+    imdb_url: Rc<RefCell<String>>,
+}
+
+impl SourceChips {
+    /// Apply a ratings lookup result: fill the IMDb score and/or point
+    /// the IMDb chip at the exact title page. When no source provides a
+    /// score, fall back to the panel's own rating; with neither, show
+    /// "N/A" (objective over invented).
+    fn apply(&self, ratings: Option<&crate::ratings::Ratings>, panel: Option<&str>) {
+        match ratings.and_then(|r| r.imdb.as_ref()) {
+            Some(score) => {
+                self.imdb_score.remove_css_class("dim-label");
+                self.imdb_score.set_text(score);
+            }
+            None => match panel {
+                Some(score) => {
+                    self.imdb_score.remove_css_class("dim-label");
+                    self.imdb_score.set_text(score);
+                }
+                None => {
+                    self.imdb_score.add_css_class("dim-label");
+                    self.imdb_score.set_text("N/A");
+                }
+            },
+        }
+        if let Some(id) = ratings.and_then(|r| r.imdb_id.as_ref()) {
+            self.imdb_url
+                .replace(format!("https://www.imdb.com/title/{id}/"));
+        }
+    }
+}
+
 /// "Ying-yang" source chips: the left half names the source, the right
-/// half shows its score — or an external-link arrow when the source
-/// carries no rating data. Activating opens the source in the browser.
-/// The panels carry no source-specific ids, so these are title searches.
-fn source_chips_row(title: &str, imdb: Option<&str>) -> gtk::Box {
+/// half shows its score — or an external-link arrow when no score is
+/// (yet) available. Activating opens the source in the browser; the IMDb
+/// chip's score/url are updated in place by the ratings lookup.
+fn source_chips_row(title: &str) -> (gtk::Box, SourceChips) {
     let query = glib::uri_escape_string(title, None::<&str>, false);
     let row = gtk::Box::builder()
         .spacing(6)
         .halign(gtk::Align::Start)
         .build();
+
+    let imdb_url = Rc::new(RefCell::new(format!(
+        "https://www.imdb.com/find/?q={query}"
+    )));
+    // While the ratings lookup runs, the score half shows a small
+    // placeholder; it settles into the score, the panel's rating or
+    // "N/A" once the lookup lands.
+    let imdb_score = gtk::Label::builder()
+        .label("…")
+        .css_classes(["dim-label"])
+        .build();
     row.append(&source_chip(
         "IMDb",
-        imdb,
-        format!("https://www.imdb.com/find/?q={query}"),
+        imdb_url.clone(),
+        Some(imdb_score.clone()),
     ));
+    // Link-only chips: no keyless source carries RT ratings (yet) and
+    // Wikipedia carries none at all, so they stay single-label pills.
+    let rotten_url = format!("https://www.rottentomatoes.com/search?search={query}");
     row.append(&source_chip(
         "Rotten Tomatoes",
+        Rc::new(RefCell::new(rotten_url)),
         None,
-        format!("https://www.rottentomatoes.com/search?search={query}"),
     ));
+    let wiki_url = format!("https://en.wikipedia.org/w/index.php?search={query}");
     row.append(&source_chip(
         "Wikipedia",
+        Rc::new(RefCell::new(wiki_url)),
         None,
-        format!("https://en.wikipedia.org/w/index.php?search={query}"),
     ));
-    row
+
+    (
+        row,
+        SourceChips {
+            imdb_score,
+            imdb_url,
+        },
+    )
 }
 
-/// One source chip: source name | score (or an arrow when unrated).
-fn source_chip(source: &str, score: Option<&str>, url: String) -> gtk::Button {
+/// One source chip: source name | right-half label when one exists
+/// (IMDb carries its score there); the URL is kept in a RefCell so an
+/// upgraded link (exact IMDb title) is used when clicked.
+fn source_chip(source: &str, url: Rc<RefCell<String>>, right: Option<gtk::Label>) -> gtk::Button {
     let content = gtk::Box::builder().spacing(8).build();
     content.append(
         &gtk::Label::builder()
@@ -1998,19 +2519,13 @@ fn source_chip(source: &str, score: Option<&str>, url: String) -> gtk::Button {
             .css_classes(["heading"])
             .build(),
     );
-    content.append(
-        &gtk::Separator::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .build(),
-    );
-    match score {
-        Some(score) => content.append(&gtk::Label::new(Some(score))),
-        None => content.append(
-            &gtk::Label::builder()
-                .label("↗")
-                .css_classes(["dim-label"])
+    if let Some(right) = &right {
+        content.append(
+            &gtk::Separator::builder()
+                .orientation(gtk::Orientation::Vertical)
                 .build(),
-        ),
+        );
+        content.append(right);
     }
     let button = gtk::Button::builder()
         .child(&content)
@@ -2021,7 +2536,11 @@ fn source_chip(source: &str, score: Option<&str>, url: String) -> gtk::Button {
         // gtk_uri_launcher_present would be the modern API; show_uri
         // still opens the default browser with zero ceremony.
         #[allow(deprecated)]
-        gtk::show_uri(None::<&gtk::Window>, &url, gtk::gdk::CURRENT_TIME);
+        gtk::show_uri(
+            None::<&gtk::Window>,
+            &url.borrow().clone(),
+            gtk::gdk::CURRENT_TIME,
+        );
     });
     button
 }
@@ -2093,13 +2612,7 @@ fn episode_row(episode: &Episode) -> gtk::ListBoxRow {
             .ellipsize(gtk::pango::EllipsizeMode::End)
             .build(),
     );
-    let mut subtitle = episode.duration.as_deref().map(format_duration);
-    if let Some(container) = &episode.container {
-        subtitle = Some(match subtitle {
-            Some(duration) => format!("{duration} · {container}"),
-            None => container.clone(),
-        });
-    }
+    let subtitle = episode.duration.as_deref().map(format_duration);
     if let Some(subtitle) = subtitle {
         text.append(
             &gtk::Label::builder()
@@ -2165,6 +2678,9 @@ fn card_body(
 
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&art));
+    // Clip every layer (picture, placeholders, chips) to the rounded
+    // card, so loaded images never poke past the frame corners.
+    overlay.set_overflow(gtk::Overflow::Hidden);
     overlay.add_overlay(&placeholder);
     overlay.add_overlay(&picture);
 

@@ -1,13 +1,14 @@
 {
   "info": {
     "movie_image": "https://picsum.photos/seed/rtv-vod-big-5020/300/450",
-    "duration_secs": 7320,
-    "duration": "0:02:02:00",
-    "plot": "The last lighthouse keeper records a shipwreck that officially never happened.",
-    "cast": "Marek Nowak, Sofia Rossi, Jin Park",
-    "director": "Aylin Demir",
-    "genre": "Thriller",
-    "releasedate": "2017-09-12",
-    "rating": "8.6"
+    "duration_secs": 7140,
+    "duration": "0:01:59:00",
+    "plot": "A night-shift baker witnesses a robbery and becomes the only credible witness.",
+    "cast": "Hana Sato, Diego Alvarez, Ruth Okonkwo",
+    "director": "Carmen Ruiz",
+    "genre": "Sci-Fi",
+    "releasedate": "1979-01-01",
+    "rating": "5.3",
+    "youtube_trailer": "https://archive.org/download/ElephantsDream/ed_hd.mp4"
   }
 }

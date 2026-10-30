@@ -1,13 +1,13 @@
 {
   "info": {
     "movie_image": "https://picsum.photos/seed/rtv-vod-big-5023/300/450",
-    "duration_secs": 8100,
-    "duration": "0:02:15:00",
-    "plot": "A road movie: one van, four musicians, zero working radios.",
-    "cast": "Hana Sato, Diego Alvarez, Ruth Okonkwo",
+    "duration_secs": 8040,
+    "duration": "0:02:14:00",
+    "plot": "Two strangers swap suitcases at a station and inherit each other's enemies.",
+    "cast": "Marek Nowak, Sofia Rossi, Jin Park",
     "director": "Aylin Demir",
-    "genre": "Comedy",
-    "releasedate": "2015-05-18",
-    "rating": "6.4"
+    "genre": "Thriller",
+    "releasedate": "2014-01-01",
+    "rating": "7.5"
   }
 }

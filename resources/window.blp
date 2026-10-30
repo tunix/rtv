@@ -165,7 +165,7 @@ template $RtvWindow : Adw.ApplicationWindow {
                   Gtk.StackPage {
                     name: "empty";
                     child: Adw.StatusPage {
-                      icon-name: "emblem-favorite-symbolic";
+                      icon-name: "rtv-heart-symbolic";
                       title: _("No favorites yet");
                       description: _("Heart your favorite content to find it here.");
                     };
@@ -245,6 +245,12 @@ template $RtvWindow : Adw.ApplicationWindow {
               };
 
               [overlay]
+              Gtk.Picture video_surface {
+                content-fit: cover;
+                visible: false;
+              }
+
+              [overlay]
               Gtk.Image app_watermark {
                 icon-name: "io.github.tunix.rtv";
                 pixel-size: 240;
@@ -263,55 +269,93 @@ template $RtvWindow : Adw.ApplicationWindow {
                 reveal-child: true;
 
                 child: Gtk.Box controls {
-                  spacing: 6;
+                  orientation: vertical;
+                  spacing: 8;
                   styles ["controls"]
 
-                  Gtk.Button seek_back {
-                    icon-name: "media-seek-backward-symbolic";
-                    tooltip-text: _("Back 10 seconds");
-                    styles ["flat"]
-                  }
-
-                  Gtk.Button play_button_small {
-                    icon-name: "media-playback-start-symbolic";
-                    tooltip-text: _("Play / Pause");
-                    styles ["flat"]
-                  }
-
-                  Gtk.Button seek_forward {
-                    icon-name: "media-seek-forward-symbolic";
-                    tooltip-text: _("Forward 10 seconds");
-                    styles ["flat"]
-                  }
-
-                  Gtk.Button mute_button {
-                    icon-name: "audio-volume-high-symbolic";
-                    tooltip-text: _("Mute / Unmute");
-                    styles ["flat"]
-                  }
-
-                  Gtk.Scale volume_scale {
-                    orientation: horizontal;
-                    width-request: 100;
-                    draw-value: false;
+                  Gtk.Box scrub_row {
+                    spacing: 8;
+                    margin-top: 10;
+                    margin-start: 10;
+                    margin-end: 10;
+                    margin-bottom: 10;
                     valign: center;
-                    adjustment: Gtk.Adjustment {
-                      lower: 0.0;
-                      upper: 1.0;
-                      value: 0.7;
-                      step-increment: 0.05;
-                      page-increment: 0.1;
-                    };
+
+                    Gtk.Label elapsed_label {
+                      label: "0:00";
+                      styles ["caption", "numeric"]
+                    }
+                    Gtk.Scale seek_scale {
+                      orientation: horizontal;
+                      hexpand: true;
+                      draw-value: false;
+                      adjustment: Gtk.Adjustment {
+                        lower: 0;
+                        upper: 100;
+                        value: 0;
+                        step-increment: 5;
+                        page-increment: 30;
+                      };
+                    }
+                    Gtk.Label duration_label {
+                      label: "0:00";
+                      styles ["caption", "numeric"]
+                    }
                   }
 
-                  Gtk.Button fullscreen_button {
-                    icon-name: "view-fullscreen-symbolic";
-                    tooltip-text: _("Fullscreen");
-                    styles ["flat"]
+                  Gtk.Box button_row {
+                    spacing: 8;
+                    margin-start: 14;
+                    margin-end: 14;
+                    margin-bottom: 10;
+                    valign: center;
+
+                    Gtk.Button seek_back {
+                      icon-name: "media-seek-backward-symbolic";
+                      tooltip-text: _("Back 10 seconds");
+                      styles ["flat"]
+                    }
+
+                    Gtk.Button play_button_small {
+                      icon-name: "media-playback-start-symbolic";
+                      tooltip-text: _("Play / Pause");
+                      styles ["flat"]
+                    }
+
+                    Gtk.Button seek_forward {
+                      icon-name: "media-seek-forward-symbolic";
+                      tooltip-text: _("Forward 10 seconds");
+                      styles ["flat"]
+                    }
+
+                    Gtk.Button mute_button {
+                      icon-name: "audio-volume-high-symbolic";
+                      tooltip-text: _("Mute / Unmute");
+                      styles ["flat"]
+                    }
+
+                    Gtk.Scale volume_scale {
+                      orientation: horizontal;
+                      width-request: 100;
+                      draw-value: false;
+                      valign: center;
+                      adjustment: Gtk.Adjustment {
+                        lower: 0.0;
+                        upper: 1.0;
+                        value: 0.7;
+                        step-increment: 0.05;
+                        page-increment: 0.1;
+                      };
+                    }
+
+                    Gtk.Button fullscreen_button {
+                      icon-name: "view-fullscreen-symbolic";
+                      tooltip-text: _("Fullscreen");
+                      styles ["flat"]
+                    }
                   }
                 };
               }
-
               [overlay]
               Gtk.Label live_badge {
                 label: "LIVE";

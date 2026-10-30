@@ -1,13 +1,13 @@
 {
   "info": {
     "movie_image": "https://picsum.photos/seed/rtv-vod-big-5009/300/450",
-    "duration_secs": 5520,
-    "duration": "0:01:32:00",
-    "plot": "The last lighthouse keeper records a shipwreck that officially never happened.",
+    "duration_secs": 5880,
+    "duration": "0:01:38:00",
+    "plot": "Two strangers swap suitcases at a station and inherit each other's enemies.",
     "cast": "Hana Sato, Diego Alvarez, Ruth Okonkwo",
     "director": "Jonas Berg",
-    "genre": "Comedy",
-    "releasedate": "2017-04-17",
-    "rating": "5.3"
+    "genre": "Sci-Fi",
+    "releasedate": "2016-01-01",
+    "rating": "9.2"
   }
 }
