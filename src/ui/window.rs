@@ -112,6 +112,14 @@ mod imp {
         #[template_child]
         pub seek_forward: TemplateChild<gtk::Button>,
         #[template_child]
+        pub scrub_row: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub seek_scale: TemplateChild<gtk::Scale>,
+        #[template_child]
+        pub elapsed_label: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub duration_label: TemplateChild<gtk::Label>,
+        #[template_child]
         pub mute_button: TemplateChild<gtk::Button>,
         #[template_child]
         pub volume_scale: TemplateChild<gtk::Scale>,
@@ -185,6 +193,12 @@ mod imp {
         /// generation may hide the controls (stale timers must no-op, since
         /// `SourceId::remove` panics on already-fired ids).
         pub controls_generation: Cell<u64>,
+        /// Bumped whenever the position ticker must be cancelled/replaced.
+        pub position_generation: Cell<u64>,
+        /// Guards the seek-scale sync: true while the ticker writes the
+        /// position programmatically (so user-seek handlers can tell them
+        /// apart).
+        pub scrub_syncing: Cell<bool>,
         /// Bumped on every grid (re)fill; stale chunk fillers no-op.
         pub fill_generation: Cell<u64>,
         /// Bumped on every open_details; stale async detail fillers no-op
@@ -544,6 +558,16 @@ impl Window {
                     pipeline.set_property("volume", scale.value());
                 }
             }
+        });
+        // The scrubber seeks the real pipeline when the user drags or
+        // clicks it. The ticker's programmatic updates don't emit
+        // change_value, so there is no feedback loop.
+        let win = self.downgrade();
+        imp.seek_scale.connect_change_value(move |_, _, value| {
+            if let Some(win) = win.upgrade() {
+                win.seek_to(value as u64);
+            }
+            glib::Propagation::Proceed
         });
         let win = self.downgrade();
         imp.fullscreen_button.connect_clicked(move |_| {
@@ -1292,13 +1316,72 @@ impl Window {
         imp.pipeline.replace(Some(playbin));
         imp.video_surface.set_visible(video);
         imp.app_watermark.set_visible(!video);
+        if video {
+            self.start_position_ticker();
+        }
         video
+    }
+
+    /// Start the position ticker: every 500 ms it queries the pipeline's
+    /// position/duration, feeds the scrub bar and the time labels, and
+    /// stops itself when playback pauses/stops or the page pops. The
+    /// generation counter cancels stale tickers without touching
+    /// already-fired source ids.
+    fn start_position_ticker(&self) {
+        let imp = self.imp();
+        let generation = imp.position_generation.get() + 1;
+        imp.position_generation.set(generation);
+        let win = self.downgrade();
+        glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+            let Some(win) = win.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let i = win.imp();
+            if i.position_generation.get() != generation {
+                return glib::ControlFlow::Break;
+            }
+            let Some(pipeline) = i.pipeline.borrow().as_ref().cloned() else {
+                return glib::ControlFlow::Break;
+            };
+            let position = pipeline
+                .query_position::<gstreamer::ClockTime>()
+                .map(|t| t.seconds());
+            let duration = pipeline
+                .query_duration::<gstreamer::ClockTime>()
+                .map(|t| t.seconds());
+            match (position, duration) {
+                (Some(pos), Some(dur)) if dur > 0 => {
+                    i.scrub_row.set_visible(true);
+                    let adj = i.seek_scale.adjustment();
+                    if (adj.upper() as u64) != dur {
+                        adj.set_upper(dur as f64);
+                    }
+                    i.scrub_syncing.set(true);
+                    i.seek_scale.set_value(pos as f64);
+                    i.scrub_syncing.set(false);
+                    i.elapsed_label.set_text(&fmt_clock(pos));
+                    i.duration_label.set_text(&fmt_clock(dur));
+                }
+                _ => {
+                    // Live stream (no duration): the scrubber is
+                    // meaningless, keep it hidden.
+                    i.scrub_row.set_visible(false);
+                }
+            }
+            if i.on_player.get() && i.playing.get() {
+                glib::ControlFlow::Continue
+            } else {
+                glib::ControlFlow::Break
+            }
+        });
     }
 
     /// Tear down any active pipeline and return the player to the demo
     /// surface. Safe to call when nothing is playing.
     fn stop_pipeline(&self) {
         let imp = self.imp();
+        imp.position_generation
+            .set(imp.position_generation.get() + 1);
         if let Some(pipeline) = imp.pipeline.take() {
             let _ = pipeline.set_state(gstreamer::State::Null);
             if let Some(bus) = pipeline.bus() {
@@ -1309,10 +1392,25 @@ impl Window {
             .set_paintable(None::<&gtk::gdk::Paintable>);
         imp.video_surface.set_visible(false);
         imp.app_watermark.set_visible(true);
+        imp.scrub_row.set_visible(false);
+        imp.seek_scale.set_value(0.0);
+        imp.elapsed_label.set_text("0:00");
         if imp.playing.get() {
             imp.playing.set(false);
             self.set_play_icon(false);
         }
+    }
+
+    /// Seek the real pipeline to `seconds`; no-op on the demo player.
+    fn seek_to(&self, seconds: u64) {
+        let pipeline = self.imp().pipeline.borrow().as_ref().cloned();
+        let Some(pipeline) = pipeline else {
+            return;
+        };
+        let _ = pipeline.seek_simple(
+            gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::KEY_UNIT,
+            gstreamer::ClockTime::from_seconds(seconds),
+        );
     }
 
     /// Seek the real pipeline by `delta` seconds; a no-op toast on the
@@ -2028,6 +2126,18 @@ fn trailers_section(
         widget: section,
         thumbs,
     })
+}
+
+/// Seconds → "M:SS" / "H:MM:SS" for the scrubber labels.
+fn fmt_clock(total: u64) -> String {
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let seconds = total % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
 }
 
 /// Cover art box with placeholder + async picture fill (same mechanics as
