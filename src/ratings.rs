@@ -138,7 +138,6 @@ fn read_cache(key: &str) -> Option<Ratings> {
     // Entries from older schema versions (missing fields) count as
     // stale, so a lookup refreshes them with the new data.
     value.get("backdrop")?;
-    value.get("metascore")?;
     Some(Ratings {
         imdb: str_field(&value, "imdb"),
         imdb_id: str_field(&value, "imdb_id"),
