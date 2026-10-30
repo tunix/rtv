@@ -62,6 +62,9 @@ pub struct Ratings {
     pub backdrop: Option<String>,
     /// Metacritic score ("74"), when the OMDb lookup reports one.
     pub metascore: Option<String>,
+    /// Whether an OMDb lookup was already attempted for this title —
+    /// gates the cache upgrade when a key appears later.
+    pub omdb_attempted: bool,
 }
 
 /// Disk cache freshness window; ratings drift slowly.
@@ -116,15 +119,25 @@ pub fn lookup(
     done: impl FnOnce(Option<Ratings>) + 'static,
 ) {
     let key = cache_key(kind, name, year);
+    let omdb_enabled = omdb_key().is_some();
+
+    // A cache hit normally answers instantly. Exception: a key appeared
+    // (RTV_OMDB_KEY) and the cached entry predates OMDb lookups — fall
+    // through so the entry gets upgraded with the OMDb data.
+    let cache_hit = |ratings: &Ratings| !omdb_enabled || ratings.omdb_attempted;
 
     if let Some(ratings) = MEM_CACHE.with(|c| c.borrow().get(&key).cloned()) {
-        done(Some(ratings));
-        return;
+        if cache_hit(&ratings) {
+            done(Some(ratings));
+            return;
+        }
     }
-    if let Some(ratings) = read_cache(&key) {
-        MEM_CACHE.with(|c| c.borrow_mut().insert(key, ratings.clone()));
-        done(Some(ratings));
-        return;
+    if let Some((ratings, attempted)) = read_cache(&key) {
+        if cache_hit(&ratings) || attempted {
+            MEM_CACHE.with(|c| c.borrow_mut().insert(key, ratings.clone()));
+            done(Some(ratings));
+            return;
+        }
     }
 
     // Mock mode fetches artwork over the network already (covers), so
@@ -143,7 +156,7 @@ pub fn lookup(
     );
 }
 
-fn read_cache(key: &str) -> Option<Ratings> {
+fn read_cache(key: &str) -> Option<(Ratings, bool)> {
     let text = fs::read_to_string(cache_dir().join(key)).ok()?;
     let value: Value = serde_json::from_str(&text).ok()?;
     let fetched_at = value.get("fetched_at").and_then(Value::as_u64)?;
@@ -154,13 +167,21 @@ fn read_cache(key: &str) -> Option<Ratings> {
     // stale, so a lookup refreshes them with the new data.
     value.get("backdrop")?;
     value.get("metascore")?;
-    Some(Ratings {
-        imdb: str_field(&value, "imdb"),
-        rt: str_field(&value, "rt"),
-        imdb_id: str_field(&value, "imdb_id"),
-        backdrop: str_field(&value, "backdrop"),
-        metascore: str_field(&value, "metascore"),
-    })
+    let attempted = value
+        .get("omdb_attempted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    Some((
+        Ratings {
+            imdb: str_field(&value, "imdb"),
+            rt: str_field(&value, "rt"),
+            imdb_id: str_field(&value, "imdb_id"),
+            backdrop: str_field(&value, "backdrop"),
+            metascore: str_field(&value, "metascore"),
+            omdb_attempted: attempted,
+        },
+        attempted,
+    ))
 }
 
 fn write_cache(key: &str, ratings: &Ratings) {
@@ -171,6 +192,7 @@ fn write_cache(key: &str, ratings: &Ratings) {
         "imdb_id": ratings.imdb_id,
         "backdrop": ratings.backdrop,
         "metascore": ratings.metascore,
+        "omdb_attempted": ratings.omdb_attempted,
     });
     let _ = fs::write(cache_dir().join(key), entry.to_string());
 }
@@ -247,7 +269,10 @@ fn omdb_then_fire(
     done: &Rc<RefCell<Option<DoneCallback>>>,
     ratings: &Rc<RefCell<Ratings>>,
 ) {
-    let _ = kind;
+    let omdb_type = match kind {
+        Kind::Vod => "movie",
+        _ => "series",
+    };
     match omdb_key() {
         None => finish(done, ratings),
         Some(key) => {
@@ -256,13 +281,19 @@ fn omdb_then_fire(
                 .as_ref()
                 .map(|y| format!("&y={}", glib::uri_escape_string(y, None::<&str>, false)))
                 .unwrap_or_default();
-            let url = format!("https://www.omdbapi.com/?apikey={key}&t={query}{year_param}");
+            let url = format!(
+                "https://www.omdbapi.com/?apikey={key}&t={query}&type={omdb_type}{year_param}"
+            );
             let done = done.clone();
             let ratings = ratings.clone();
             let name = name.to_string();
             get_json(&url, move |value| {
                 if let Some(value) = &value {
-                    fill_omdb(value, &name, &mut ratings.borrow_mut());
+                    {
+                        let mut pending = ratings.borrow_mut();
+                        fill_omdb(value, &name, &mut pending);
+                        pending.omdb_attempted = true;
+                    }
                 }
                 finish(&done, &ratings);
             });
@@ -297,17 +328,16 @@ fn fill_omdb(value: &Value, name: &str, ratings: &mut Ratings) {
     if let Some(rating) = str_field(value, "imdbRating") {
         ratings.imdb = Some(rating);
     }
-    if let Some(rt) = str_field(value, "Ratings").and_then(|_| {
-        value
-            .get("Ratings")
-            .and_then(Value::as_array)
-            .and_then(|arr| {
-                arr.iter()
-                    .find(|r| r.get("Source").and_then(Value::as_str) == Some("Rotten Tomatoes"))
-                    .and_then(|r| r.get("Value").and_then(Value::as_str))
-            })
-            .map(|v| v.trim_end_matches('%').to_string())
-    }) {
+    if let Some(rt) = value
+        .get("Ratings")
+        .and_then(Value::as_array)
+        .and_then(|arr| {
+            arr.iter()
+                .find(|r| r.get("Source").and_then(Value::as_str) == Some("Rotten Tomatoes"))
+                .and_then(|r| r.get("Value").and_then(Value::as_str))
+        })
+        .map(|v| v.trim_end_matches('%').to_string())
+    {
         ratings.rt = Some(rt);
     }
     if let Some(meta) = str_field(value, "Metascore").filter(|m| m != "N/A") {
@@ -542,6 +572,36 @@ mod tests {
     }
 
     #[test]
+    fn fill_omdb_parses_and_guards_title() {
+        let value = json!({
+            "Title": "Inception", "Year": "2010", "Response": "True",
+            "imdbRating": "8.8", "Metascore": "74", "imdbID": "tt1375666",
+            "Ratings": [
+                {"Source": "Internet Movie Database", "Value": "8.8/10"},
+                {"Source": "Rotten Tomatoes", "Value": "87%"},
+                {"Source": "Metacritic", "Value": "74/100"}
+            ]
+        });
+        let mut ratings = Ratings::default();
+        fill_omdb(&value, "Inception", &mut ratings);
+        assert_eq!(ratings.imdb.as_deref(), Some("8.8"));
+        assert_eq!(ratings.rt.as_deref(), Some("87"));
+        assert_eq!(ratings.metascore.as_deref(), Some("74"));
+        assert_eq!(ratings.imdb_id.as_deref(), Some("tt1375666"));
+
+        // A different title must not leak its scores.
+        let mut ratings = Ratings::default();
+        fill_omdb(&value, "Aliens", &mut ratings);
+        assert!(ratings.imdb.is_none());
+
+        // Failed responses are ignored entirely.
+        let failed = json!({"Response": "False", "Error": "Movie not found!"});
+        let mut ratings = Ratings::default();
+        fill_omdb(&failed, "Inception", &mut ratings);
+        assert!(ratings.imdb.is_none());
+    }
+
+    #[test]
     fn cache_round_trips_ratings() {
         let ratings = Ratings {
             imdb: Some("9.2".to_string()),
@@ -551,6 +611,7 @@ mod tests {
             backdrop: Some(
                 "https://images.metahub.space/background/medium/tt0903747/img".to_string(),
             ),
+            omdb_attempted: true,
         };
         let entry = serde_json::json!({
             "fetched_at": now(),
@@ -567,6 +628,10 @@ mod tests {
             metascore: str_field(&value, "metascore"),
             imdb_id: str_field(&value, "imdb_id"),
             backdrop: str_field(&value, "backdrop"),
+            omdb_attempted: value
+                .get("omdb_attempted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         };
         assert_eq!(round.imdb.as_deref(), Some("9.2"));
         assert_eq!(round.imdb_id.as_deref(), Some("tt0903747"));

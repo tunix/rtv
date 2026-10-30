@@ -112,8 +112,6 @@ mod imp {
         #[template_child]
         pub seek_forward: TemplateChild<gtk::Button>,
         #[template_child]
-        pub mute_button: TemplateChild<gtk::Button>,
-        #[template_child]
         pub volume_scale: TemplateChild<gtk::Scale>,
         #[template_child]
         pub fullscreen_button: TemplateChild<gtk::Button>,
