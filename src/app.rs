@@ -83,8 +83,12 @@ pub fn run() {
 
         let window = ui::window::Window::new(app);
         window.present();
-        if window.sample_catalog_missing() {
-            window.toast("samples/ not found — mock catalog is empty");
+        // samples/ is an optional dev convenience in real mode — its absence
+        // only deserves a toast in mock mode, where the offline catalog is
+        // the whole point. Release builds fold `mock::enabled()` to `false`
+        // and stay silent.
+        if crate::mock::enabled() && window.sample_catalog_missing() {
+            window.toast("mock/ not found — the mock catalog is empty");
         }
     });
 

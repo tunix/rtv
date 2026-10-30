@@ -50,7 +50,7 @@ template $RtvWindow : Adw.ApplicationWindow {
             };
 
             [end]
-            Gtk.MenuButton {
+            Gtk.MenuButton menu_button {
               primary: true;
               icon-name: "open-menu-symbolic";
               tooltip-text: _("Main Menu");
@@ -456,15 +456,14 @@ template $RtvWindow : Adw.ApplicationWindow {
   };
 }
 
+/* The mock-reset item is injected in code on dev builds only (see
+ * Window::setup_actions): the release gresource must carry no mock
+ * strings. */
 menu primary_menu {
   section {
     item {
       label: _("_Add source…");
       action: "win.add-source";
-    }
-    item {
-      label: _("Reset mock state");
-      action: "win.reset-mock";
     }
   }
   section {
