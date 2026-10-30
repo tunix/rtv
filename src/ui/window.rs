@@ -112,6 +112,8 @@ mod imp {
         #[template_child]
         pub seek_forward: TemplateChild<gtk::Button>,
         #[template_child]
+        pub mute_button: TemplateChild<gtk::Button>,
+        #[template_child]
         pub volume_scale: TemplateChild<gtk::Scale>,
         #[template_child]
         pub fullscreen_button: TemplateChild<gtk::Button>,
@@ -2273,22 +2275,17 @@ fn section_title(text: &str) -> gtk::Label {
 /// The updatable parts of the source chips row: the IMDb chip's score
 /// label and its URL (upgraded to the exact title page once the ratings
 /// lookup resolves the IMDb id). The Rotten Tomatoes and Wikipedia chips
-/// are link-only; a Metacritic chip joins the row dynamically when the
-/// OMDb lookup reports a Metascore.
+/// are link-only.
 struct SourceChips {
-    row: gtk::Box,
-    imdb_chip: gtk::Button,
     imdb_score: gtk::Label,
     imdb_url: Rc<RefCell<String>>,
-    metacritic_added: std::cell::Cell<bool>,
 }
 
 impl SourceChips {
     /// Apply a ratings lookup result: fill the IMDb score and/or point
     /// the IMDb chip at the exact title page. When no source provides a
     /// score, fall back to the panel's own rating; with neither, show
-    /// "N/A" (objective over invented). A Metascore from the OMDb lookup
-    /// adds a Metacritic chip next to IMDb.
+    /// "N/A" (objective over invented).
     fn apply(&self, ratings: Option<&crate::ratings::Ratings>, panel: Option<&str>) {
         match ratings.and_then(|r| r.imdb.as_ref()) {
             Some(score) => {
@@ -2309,22 +2306,6 @@ impl SourceChips {
         if let Some(id) = ratings.and_then(|r| r.imdb_id.as_ref()) {
             self.imdb_url
                 .replace(format!("https://www.imdb.com/title/{id}/"));
-        }
-        // The Metacritic chip only appears when the OMDb lookup actually
-        // carries a score — no key, no chip.
-        if let Some(metascore) = ratings.and_then(|r| r.metascore.as_ref()) {
-            if !self.metacritic_added.get() {
-                self.metacritic_added.set(true);
-                let url = Rc::new(RefCell::new(
-                    "https://www.metacritic.com/search/".to_string(),
-                ));
-                let score = gtk::Label::builder()
-                    .label(metascore)
-                    .css_classes(["heading"])
-                    .build();
-                let chip = source_chip("Metacritic", url, Some(score));
-                self.row.insert_child_after(&chip, Some(&self.imdb_chip));
-            }
         }
     }
 }
@@ -2350,8 +2331,11 @@ fn source_chips_row(title: &str) -> (gtk::Box, SourceChips) {
         .label("…")
         .css_classes(["dim-label"])
         .build();
-    let imdb_chip = source_chip("IMDb", imdb_url.clone(), Some(imdb_score.clone()));
-    row.append(&imdb_chip);
+    row.append(&source_chip(
+        "IMDb",
+        imdb_url.clone(),
+        Some(imdb_score.clone()),
+    ));
     // Link-only chips: no keyless source carries RT ratings (yet) and
     // Wikipedia carries none at all, so they stay single-label pills.
     let rotten_url = format!("https://www.rottentomatoes.com/search?search={query}");
@@ -2368,13 +2352,10 @@ fn source_chips_row(title: &str) -> (gtk::Box, SourceChips) {
     ));
 
     (
-        row.clone(),
+        row,
         SourceChips {
-            row,
-            imdb_chip,
             imdb_score,
             imdb_url,
-            metacritic_added: std::cell::Cell::new(false),
         },
     )
 }

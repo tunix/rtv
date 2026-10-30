@@ -5,27 +5,20 @@
 //! (Mock mode fetches artwork the same way, so lookups run there too;
 //! offline they fail gracefully.)
 //!
-//! Provider chain (all speaking JSON):
-//! - **Cinemeta** (Stremio's metadata addon, keyless; movies AND series):
-//!   the catalog search resolves a title to its IMDb id, and the meta
-//!   endpoint carries `imdbRating` + the 16:9 backdrop.
-//! - **TVmaze search** (series fallback when Cinemeta misses): carries
-//!   the IMDb-sourced average rating.
-//! - **OMDb** (free API key): one call returns the fresher IMDb rating,
-//!   the Rotten Tomatoes score and the Metascore, so a Metacritic chip
-//!   can join the row. The key comes from `RTV_OMDB_KEY` until the
-//!   source-settings dialog exists.
+//! Provider chain (all keyless, all speaking JSON):
+//! - **IMDb suggestion API** (`v2.sg.media-imdb.com`): resolves the
+//!   title to its exact IMDb id — the IMDb chip links to the exact
+//!   title page instead of a search.
+//! - **Cinemeta** (Stremio's metadata addon; movies AND series): the
+//!   meta endpoint by IMDb id carries `imdbRating` + the 16:9 backdrop.
+//! - **Cinemeta title search** (fallback when the suggestion missed).
+//! - **TVmaze search** (series fallback): carries the IMDb-sourced
+//!   average rating.
 //!
-//! TODO(backend): the settings page should collect the OMDb API key and
-//! store it in the GNOME Keyring (see AGENTS.md — credentials never in
-//! plain files); `RTV_OMDB_KEY` is the temporary channel. The
-//! environment is only read when a lookup runs, never logged.
-//!
-//! Rotten Tomatoes has no keyless JSON source (its search results are
-//! rendered client-side) — its score arrives through OMDb instead. The
-//! RT and Wikipedia chips are deliberately link-only per design.
 //! When no source provides a score, the UI falls back to the panel's
-//! own rating and finally to "N/A".
+//! own rating and finally to "N/A". The Rotten Tomatoes and Wikipedia
+//! chips are deliberately link-only: RT has no keyless JSON source and
+//! Wikipedia carries no film ratings.
 
 use std::{
     cell::RefCell,
@@ -50,21 +43,11 @@ use crate::sample::Kind;
 pub struct Ratings {
     /// IMDb score ("8.4"), when a source provides it.
     pub imdb: Option<String>,
-    /// Rotten Tomatoes critics score — no keyless source yet; reserved
-    /// for a metadata provider (OMDb/TMDB) in the backend phase. The
-    /// cache and chips are already shaped to carry it.
-    #[allow(dead_code)]
-    pub rt: Option<String>,
     /// Resolved IMDb id ("tt1375666").
     pub imdb_id: Option<String>,
     /// 16:9 backdrop artwork from Cinemeta — doubles as the trailer
     /// row thumbnail.
     pub backdrop: Option<String>,
-    /// Metacritic score ("74"), when the OMDb lookup reports one.
-    pub metascore: Option<String>,
-    /// Whether an OMDb lookup was already attempted for this title —
-    /// gates the cache upgrade when a key appears later.
-    pub omdb_attempted: bool,
 }
 
 /// Disk cache freshness window; ratings drift slowly.
@@ -74,7 +57,7 @@ const TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
 type DoneCallback = Box<dyn FnOnce(Option<Ratings>)>;
 
 thread_local! {
-    static SESSION: soup::Session = soup::Session::new();
+    static SESSION: soup::Session = soup::Session::builder().timeout(30).build();
     static MEM_CACHE: RefCell<HashMap<String, Ratings>> = RefCell::new(HashMap::new());
 }
 
@@ -119,25 +102,14 @@ pub fn lookup(
     done: impl FnOnce(Option<Ratings>) + 'static,
 ) {
     let key = cache_key(kind, name, year);
-    let omdb_enabled = omdb_key().is_some();
-
-    // A cache hit normally answers instantly. Exception: a key appeared
-    // (RTV_OMDB_KEY) and the cached entry predates OMDb lookups — fall
-    // through so the entry gets upgraded with the OMDb data.
-    let cache_hit = |ratings: &Ratings| !omdb_enabled || ratings.omdb_attempted;
-
     if let Some(ratings) = MEM_CACHE.with(|c| c.borrow().get(&key).cloned()) {
-        if cache_hit(&ratings) {
-            done(Some(ratings));
-            return;
-        }
+        done(Some(ratings));
+        return;
     }
-    if let Some((ratings, attempted)) = read_cache(&key) {
-        if cache_hit(&ratings) || attempted {
-            MEM_CACHE.with(|c| c.borrow_mut().insert(key, ratings.clone()));
-            done(Some(ratings));
-            return;
-        }
+    if let Some(ratings) = read_cache(&key) {
+        MEM_CACHE.with(|c| c.borrow_mut().insert(key, ratings.clone()));
+        done(Some(ratings));
+        return;
     }
 
     // Mock mode fetches artwork over the network already (covers), so
@@ -156,7 +128,7 @@ pub fn lookup(
     );
 }
 
-fn read_cache(key: &str) -> Option<(Ratings, bool)> {
+fn read_cache(key: &str) -> Option<Ratings> {
     let text = fs::read_to_string(cache_dir().join(key)).ok()?;
     let value: Value = serde_json::from_str(&text).ok()?;
     let fetched_at = value.get("fetched_at").and_then(Value::as_u64)?;
@@ -167,39 +139,29 @@ fn read_cache(key: &str) -> Option<(Ratings, bool)> {
     // stale, so a lookup refreshes them with the new data.
     value.get("backdrop")?;
     value.get("metascore")?;
-    let attempted = value
-        .get("omdb_attempted")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    Some((
-        Ratings {
-            imdb: str_field(&value, "imdb"),
-            rt: str_field(&value, "rt"),
-            imdb_id: str_field(&value, "imdb_id"),
-            backdrop: str_field(&value, "backdrop"),
-            metascore: str_field(&value, "metascore"),
-            omdb_attempted: attempted,
-        },
-        attempted,
-    ))
+    Some(Ratings {
+        imdb: str_field(&value, "imdb"),
+        imdb_id: str_field(&value, "imdb_id"),
+        backdrop: str_field(&value, "backdrop"),
+    })
 }
 
 fn write_cache(key: &str, ratings: &Ratings) {
     let entry = serde_json::json!({
         "fetched_at": now(),
         "imdb": ratings.imdb,
-        "rt": ratings.rt,
         "imdb_id": ratings.imdb_id,
         "backdrop": ratings.backdrop,
-        "metascore": ratings.metascore,
-        "omdb_attempted": ratings.omdb_attempted,
     });
     let _ = fs::write(cache_dir().join(key), entry.to_string());
 }
 
-/// The provider chain: Cinemeta search → Cinemeta meta (score for both
-/// kinds); TVmaze as the series fallback when Cinemeta misses. `done`
-/// runs exactly once.
+/// The provider chain: IMDb's own keyless suggestion endpoint resolves
+/// the title to its exact IMDb id first (so the IMDb chip links to the
+/// exact title page); Cinemeta's meta endpoint then carries the
+/// IMDb-sourced score + backdrop by that id. Cinemeta title-search is
+/// the fallback when the suggestion misses, TVmaze the series fallback
+/// when both miss. `done` runs exactly once.
 fn fetch_chain(
     kind: Kind,
     name: String,
@@ -209,6 +171,78 @@ fn fetch_chain(
     let ratings: Rc<RefCell<Ratings>> = Rc::new(RefCell::new(Ratings::default()));
     let done: Rc<RefCell<Option<DoneCallback>>> = Rc::new(RefCell::new(Some(Box::new(done))));
 
+    // Step 1: IMDb suggestion (path-keyed by the first character).
+    let trimmed = name.trim();
+    let initial = trimmed
+        .chars()
+        .next()
+        .map(|c| c.to_lowercase().next().unwrap_or('_'))
+        .unwrap_or('_');
+    let initial = if initial.is_ascii_alphanumeric() {
+        initial.to_string()
+    } else {
+        "_".to_string()
+    };
+    let query = glib::uri_escape_string(trimmed, None::<&str>, false).to_string();
+    let suggestion_url = format!("https://v2.sg.media-imdb.com/suggestion/{initial}/{query}.json");
+
+    get_json(&suggestion_url, move |value| {
+        let suggestion_id = value
+            .as_ref()
+            .and_then(|v| pick_suggestion(v, &name, &year));
+        match suggestion_id {
+            // Step 2a: exact IMDb id — Cinemeta meta by id.
+            Some(imdb_id) => {
+                ratings.borrow_mut().imdb_id = Some(imdb_id.clone());
+                cinemeta_meta(kind, imdb_id, name.clone(), year, done, ratings);
+            }
+            // Step 2b: suggestion missed — Cinemeta title search.
+            None => cinemeta_search(kind, name, year, done, ratings),
+        }
+    });
+}
+
+/// Cinemeta meta by exact IMDb id: the freshest score + backdrop, then
+/// the TVmaze fallback for series when the meta carries no rating.
+fn cinemeta_meta(
+    kind: Kind,
+    imdb_id: String,
+    name: String,
+    year: Option<String>,
+    done: Rc<RefCell<Option<DoneCallback>>>,
+    ratings: Rc<RefCell<Ratings>>,
+) {
+    let catalog_type = match kind {
+        Kind::Vod => "movie",
+        _ => "series",
+    };
+    let meta_url = format!("https://v3-cinemeta.strem.io/meta/{catalog_type}/{imdb_id}.json");
+    get_json(&meta_url, move |value| {
+        if let Some(value) = &value {
+            {
+                let mut pending = ratings.borrow_mut();
+                pending.imdb = cinemeta_rating(value);
+                pending.backdrop = value.get("meta").and_then(|m| str_field(m, "background"));
+            }
+        }
+        if kind == Kind::Series && ratings.borrow().imdb.is_none() {
+            // Cinemeta carried no rating for this series: TVmaze still
+            // covers it.
+            tvmaze_lookup(name, year, done, ratings);
+        } else {
+            fire(&done, &ratings);
+        }
+    });
+}
+
+/// Cinemeta title search (fallback when the IMDb suggestion missed).
+fn cinemeta_search(
+    kind: Kind,
+    name: String,
+    year: Option<String>,
+    done: Rc<RefCell<Option<DoneCallback>>>,
+    ratings: Rc<RefCell<Ratings>>,
+) {
     let catalog_type = match kind {
         Kind::Vod => "movie",
         _ => "series",
@@ -216,21 +250,14 @@ fn fetch_chain(
     let query = glib::uri_escape_string(name.trim(), None::<&str>, false).to_string();
     let search_url =
         format!("https://v3-cinemeta.strem.io/catalog/{catalog_type}/top/search={query}.json");
-
     get_json(&search_url, move |value| {
         let picked = value.as_ref().and_then(|v| pick_cinemeta(v, &name, &year));
         let Some((imdb_id, meta_type)) = picked else {
             // Cinemeta missed: TVmaze still covers series.
             if kind == Kind::Series {
-                let tvmaze_url = format!("https://api.tvmaze.com/search/shows?q={query}");
-                get_json(&tvmaze_url, move |value| {
-                    if let Some(value) = &value {
-                        fill_tvmaze(value, &name, &year, &mut ratings.borrow_mut());
-                    }
-                    omdb_then_fire(kind, &name, year.clone(), &done, &ratings);
-                });
+                tvmaze_lookup(name, year, done, ratings);
             } else {
-                omdb_then_fire(Kind::Vod, &name, year, &done, &ratings);
+                fire(&done, &ratings);
             }
             return;
         };
@@ -244,107 +271,38 @@ fn fetch_chain(
                     pending.backdrop = value.get("meta").and_then(|m| str_field(m, "background"));
                 }
             }
-            omdb_then_fire(kind, &name, year, &done, &ratings);
+            if kind == Kind::Series && ratings.borrow().imdb.is_none() {
+                tvmaze_lookup(name, year, done, ratings);
+            } else {
+                fire(&done, &ratings);
+            }
         });
     });
 }
 
-/// Consume the pending callback with the (possibly partial) result.
-fn finish(done: &Rc<RefCell<Option<DoneCallback>>>, ratings: &Rc<RefCell<Ratings>>) {
+/// TVmaze search: the IMDb-sourced average rating for series (the last
+/// keyless fallback).
+fn tvmaze_lookup(
+    name: String,
+    year: Option<String>,
+    done: Rc<RefCell<Option<DoneCallback>>>,
+    ratings: Rc<RefCell<Ratings>>,
+) {
+    let query = glib::uri_escape_string(name.trim(), None::<&str>, false).to_string();
+    let tvmaze_url = format!("https://api.tvmaze.com/search/shows?q={query}");
+    get_json(&tvmaze_url, move |value| {
+        if let Some(value) = &value {
+            fill_tvmaze(value, &name, &year, &mut ratings.borrow_mut());
+        }
+        fire(&done, &ratings);
+    });
+}
+
+/// Fire the pending callback with the current state.
+fn fire(done: &Rc<RefCell<Option<DoneCallback>>>, ratings: &Rc<RefCell<Ratings>>) {
     let snapshot = ratings.borrow().clone();
     if let Some(done) = done.borrow_mut().take() {
         done(Some(snapshot));
-    }
-}
-
-/// The terminal step of every provider chain: with an OMDb API key
-/// present (`RTV_OMDB_KEY`), the freshest IMDb rating, the Rotten
-/// Tomatoes score and the Metascore are merged into the result before it
-/// reaches the caller. OMDb matches by title (the panel's name);
-/// unmatched titles keep whatever the keyless chain found.
-fn omdb_then_fire(
-    kind: Kind,
-    name: &str,
-    year: Option<String>,
-    done: &Rc<RefCell<Option<DoneCallback>>>,
-    ratings: &Rc<RefCell<Ratings>>,
-) {
-    let omdb_type = match kind {
-        Kind::Vod => "movie",
-        _ => "series",
-    };
-    match omdb_key() {
-        None => finish(done, ratings),
-        Some(key) => {
-            let query = glib::uri_escape_string(name.trim(), None::<&str>, false).to_string();
-            let year_param = year
-                .as_ref()
-                .map(|y| format!("&y={}", glib::uri_escape_string(y, None::<&str>, false)))
-                .unwrap_or_default();
-            let url = format!(
-                "https://www.omdbapi.com/?apikey={key}&t={query}&type={omdb_type}{year_param}"
-            );
-            let done = done.clone();
-            let ratings = ratings.clone();
-            let name = name.to_string();
-            get_json(&url, move |value| {
-                if let Some(value) = &value {
-                    {
-                        let mut pending = ratings.borrow_mut();
-                        fill_omdb(value, &name, &mut pending);
-                        pending.omdb_attempted = true;
-                    }
-                }
-                finish(&done, &ratings);
-            });
-        }
-    }
-}
-
-/// The OMDb API key from `RTV_OMDB_KEY`, read fresh on every lookup so
-/// it can be changed without a restart. None when unset.
-fn omdb_key() -> Option<String> {
-    std::env::var("RTV_OMDB_KEY")
-        .ok()
-        .filter(|key| !key.trim().is_empty())
-        .map(|key| key.trim().to_string())
-}
-
-/// Merge the OMDb response into the ratings: the freshest IMDb rating,
-/// the Rotten Tomatoes score and the Metascore. The Title must loosely
-/// match the looked-up name (guards against wrong matches); "N/A" values
-/// stay absent.
-fn fill_omdb(value: &Value, name: &str, ratings: &mut Ratings) {
-    if str_field(value, "Response").as_deref() != Some("True") {
-        return;
-    }
-    let Some(title) = str_field(value, "Title") else {
-        return;
-    };
-    let wanted = name.trim().to_lowercase();
-    if !title.to_lowercase().starts_with(&wanted) {
-        return;
-    }
-    if let Some(rating) = str_field(value, "imdbRating") {
-        ratings.imdb = Some(rating);
-    }
-    if let Some(rt) = value
-        .get("Ratings")
-        .and_then(Value::as_array)
-        .and_then(|arr| {
-            arr.iter()
-                .find(|r| r.get("Source").and_then(Value::as_str) == Some("Rotten Tomatoes"))
-                .and_then(|r| r.get("Value").and_then(Value::as_str))
-        })
-        .map(|v| v.trim_end_matches('%').to_string())
-    {
-        ratings.rt = Some(rt);
-    }
-    if let Some(meta) = str_field(value, "Metascore").filter(|m| m != "N/A") {
-        ratings.metascore = Some(meta);
-    }
-    if let Some(id) = str_field(value, "imdbID") {
-        ratings.imdb_id = Some(id);
     }
 }
 
@@ -400,6 +358,44 @@ fn pick_cinemeta(value: &Value, name: &str, year: &Option<String>) -> Option<(St
             exact = exact.or_else(|| Some((id.to_string(), meta_type)));
         } else if title.starts_with(&wanted) {
             prefix = prefix.or_else(|| Some((id.to_string(), meta_type)));
+        }
+    }
+    exact.or(prefix)
+}
+
+/// Pick the IMDb suggestion entry matching the title (and year, when
+/// known): exact title + year, then any exact title match, then a title
+/// prefix match. Returns the IMDb id.
+fn pick_suggestion(value: &Value, name: &str, year: &Option<String>) -> Option<String> {
+    let entries = value.get("d")?.as_array()?;
+    let wanted = name.trim().to_lowercase();
+    let year_num = year.as_deref().and_then(year_prefix);
+    let mut exact = None;
+    let mut prefix = None;
+    for entry in entries {
+        let Some(id) = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| id.starts_with("tt"))
+        else {
+            continue;
+        };
+        let Some(title) = entry.get("l").and_then(Value::as_str) else {
+            continue;
+        };
+        let title = title.to_lowercase();
+        let entry_year = entry.get("y").and_then(Value::as_i64);
+        let year_match = match (year_num, entry_year) {
+            (Some(wanted), Some(actual)) => actual == wanted,
+            _ => true,
+        };
+        if title == wanted {
+            if year_match {
+                return Some(id.to_string());
+            }
+            exact = exact.or_else(|| Some(id.to_string()));
+        } else if title.starts_with(&wanted) {
+            prefix = prefix.or_else(|| Some(id.to_string()));
         }
     }
     exact.or(prefix)
@@ -507,6 +503,30 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn suggestion_picks_title_and_year() {
+        let value = json!({
+            "d": [
+                {"id": "tt999", "l": "1883: The Sequel", "y": 2025},
+                {"id": "tt111", "l": "1883", "y": 2021},
+                {"id": "tt222", "l": "1883", "y": 2019}
+            ]
+        });
+        // Exact title + matching year beats everything.
+        let year = Some("2021-06-01".to_string());
+        assert_eq!(
+            pick_suggestion(&value, "1883", &year).as_deref(),
+            Some("tt111")
+        );
+        // No year: the exact title match still wins over a prefix match.
+        assert_eq!(
+            pick_suggestion(&value, "1883", &None).as_deref(),
+            Some("tt111")
+        );
+        // Unrelated title: no match.
+        assert_eq!(pick_suggestion(&value, "yellowstone", &None), None);
+    }
+
+    #[test]
     fn cinemeta_picks_title_and_type() {
         let value = json!({
             "metas": [
@@ -572,51 +592,17 @@ mod tests {
     }
 
     #[test]
-    fn fill_omdb_parses_and_guards_title() {
-        let value = json!({
-            "Title": "Inception", "Year": "2010", "Response": "True",
-            "imdbRating": "8.8", "Metascore": "74", "imdbID": "tt1375666",
-            "Ratings": [
-                {"Source": "Internet Movie Database", "Value": "8.8/10"},
-                {"Source": "Rotten Tomatoes", "Value": "87%"},
-                {"Source": "Metacritic", "Value": "74/100"}
-            ]
-        });
-        let mut ratings = Ratings::default();
-        fill_omdb(&value, "Inception", &mut ratings);
-        assert_eq!(ratings.imdb.as_deref(), Some("8.8"));
-        assert_eq!(ratings.rt.as_deref(), Some("87"));
-        assert_eq!(ratings.metascore.as_deref(), Some("74"));
-        assert_eq!(ratings.imdb_id.as_deref(), Some("tt1375666"));
-
-        // A different title must not leak its scores.
-        let mut ratings = Ratings::default();
-        fill_omdb(&value, "Aliens", &mut ratings);
-        assert!(ratings.imdb.is_none());
-
-        // Failed responses are ignored entirely.
-        let failed = json!({"Response": "False", "Error": "Movie not found!"});
-        let mut ratings = Ratings::default();
-        fill_omdb(&failed, "Inception", &mut ratings);
-        assert!(ratings.imdb.is_none());
-    }
-
-    #[test]
     fn cache_round_trips_ratings() {
         let ratings = Ratings {
             imdb: Some("9.2".to_string()),
-            rt: None,
-            metascore: None,
             imdb_id: Some("tt0903747".to_string()),
             backdrop: Some(
                 "https://images.metahub.space/background/medium/tt0903747/img".to_string(),
             ),
-            omdb_attempted: true,
         };
         let entry = serde_json::json!({
             "fetched_at": now(),
             "imdb": ratings.imdb,
-            "rt": ratings.rt,
             "imdb_id": ratings.imdb_id,
             "backdrop": ratings.backdrop,
         });
@@ -624,18 +610,11 @@ mod tests {
         let value: Value = serde_json::from_str(&entry.to_string()).unwrap();
         let round = Ratings {
             imdb: str_field(&value, "imdb"),
-            rt: str_field(&value, "rt"),
-            metascore: str_field(&value, "metascore"),
             imdb_id: str_field(&value, "imdb_id"),
             backdrop: str_field(&value, "backdrop"),
-            omdb_attempted: value
-                .get("omdb_attempted")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
         };
         assert_eq!(round.imdb.as_deref(), Some("9.2"));
         assert_eq!(round.imdb_id.as_deref(), Some("tt0903747"));
-        assert!(round.rt.is_none());
         assert!(round.backdrop.is_some());
     }
 
@@ -647,11 +626,18 @@ mod tests {
         gtk::init().expect("gtk init");
         let received: Rc<RefCell<Option<Ratings>>> = Rc::new(RefCell::new(None));
         let loop_ = glib::MainLoop::new(None, false);
-        let quit = loop_.clone();
-        let sink = received.clone();
-        lookup(Kind::Series, "Dexter", Some("2006"), move |ratings| {
-            *sink.borrow_mut() = ratings;
-            quit.quit();
+        // The lookup is scheduled from an idle callback: a synchronous
+        // cache hit would otherwise call quit() before run() starts —
+        // which GLib ignores, hanging the loop forever.
+        glib::idle_add_local_once({
+            let quit = loop_.clone();
+            let sink = received.clone();
+            move || {
+                lookup(Kind::Series, "Dexter", Some("2006"), move |ratings| {
+                    *sink.borrow_mut() = ratings;
+                    quit.quit();
+                });
+            }
         });
         loop_.run();
         let ratings = received.borrow().clone().expect("lookup succeeded");

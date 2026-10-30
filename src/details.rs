@@ -23,7 +23,7 @@ use soup::prelude::*;
 pub const USER_AGENT: &str = "okhttp/4.9.3";
 
 thread_local! {
-    static SESSION: soup::Session = soup::Session::new();
+    static SESSION: soup::Session = soup::Session::builder().timeout(30).build();
     static SERIES_CACHE: RefCell<HashMap<i64, SeriesInfo>> = RefCell::new(HashMap::new());
     static VOD_CACHE: RefCell<HashMap<i64, VodInfo>> = RefCell::new(HashMap::new());
 }
