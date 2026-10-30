@@ -9,6 +9,13 @@ mod ui;
 use gtk::gio;
 use gtk::gio::prelude::*;
 
+/// Usage shown for unknown arguments. `--mock` only exists in dev builds
+/// (`mock::AVAILABLE`), so release builds advertise only `--check-icons`.
+#[cfg(debug_assertions)]
+const USAGE: &str = "Usage: rtv [--mock] [--check-icons]";
+#[cfg(not(debug_assertions))]
+const USAGE: &str = "Usage: rtv [--check-icons]";
+
 fn main() {
     let args = std::env::args().skip(1);
     for arg in args {
@@ -34,9 +41,16 @@ fn main() {
                 }
                 return;
             }
-            "--mock" => mock::set_enabled(true),
+            "--mock" => {
+                if mock::AVAILABLE {
+                    mock::set_enabled(true);
+                } else {
+                    eprintln!("--mock is only available in development builds\n{USAGE}");
+                    std::process::exit(2);
+                }
+            }
             other => {
-                eprintln!("Unknown argument: {other}\nUsage: rtv [--mock] [--check-icons]");
+                eprintln!("Unknown argument: {other}\n{USAGE}");
                 std::process::exit(2);
             }
         }
