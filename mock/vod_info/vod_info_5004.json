@@ -1,13 +1,14 @@
 {
   "info": {
     "movie_image": "https://picsum.photos/seed/rtv-vod-big-5004/300/450",
-    "duration_secs": 8220,
-    "duration": "0:02:17:00",
-    "plot": "A gardener cultivates a species that blooms once a century \u2014 tonight.",
-    "cast": "Tomas Weber, Aisha Bello, Luc Moreau",
-    "director": "Aylin Demir",
-    "genre": "Comedy",
-    "releasedate": "2019-06-20",
-    "rating": "5.6"
+    "duration_secs": 8160,
+    "duration": "0:02:16:00",
+    "plot": "The last lighthouse keeper records a shipwreck that officially never happened.",
+    "cast": "Marek Nowak, Sofia Rossi, Jin Park",
+    "director": "Jonas Berg",
+    "genre": "Sci-Fi",
+    "releasedate": "2014-01-01",
+    "rating": "5.9",
+    "youtube_trailer": "https://archive.org/download/ElephantsDream/ed_hd.mp4"
   }
 }

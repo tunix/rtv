@@ -1,13 +1,14 @@
 {
   "info": {
     "movie_image": "https://picsum.photos/seed/rtv-vod-big-5018/300/450",
-    "duration_secs": 7020,
-    "duration": "0:01:57:00",
-    "plot": "A gardener cultivates a species that blooms once a century \u2014 tonight.",
+    "duration_secs": 8760,
+    "duration": "0:02:26:00",
+    "plot": "An chess prodigy faces the machine she helped build.",
     "cast": "Tomas Weber, Aisha Bello, Luc Moreau",
-    "director": "Carmen Ruiz",
-    "genre": "Drama",
-    "releasedate": "2025-11-02",
-    "rating": "7.4"
+    "director": "Jonas Berg",
+    "genre": "Comedy",
+    "releasedate": "2009-01-01",
+    "rating": "5.7",
+    "youtube_trailer": "https://media.w3.org/2010/05/bunny/movie.mp4"
   }
 }

@@ -2,24 +2,10 @@
   "seasons": [
     {
       "air_date": "2021-01-15",
-      "episode_count": 3,
+      "episode_count": 8,
       "name": "Season 1",
       "cover": "https://picsum.photos/seed/rtv-s3007-e1/150/225",
       "season_number": 1
-    },
-    {
-      "air_date": "2022-02-15",
-      "episode_count": 5,
-      "name": "Season 2",
-      "cover": "https://picsum.photos/seed/rtv-s3007-e2/150/225",
-      "season_number": 2
-    },
-    {
-      "air_date": "2023-03-15",
-      "episode_count": 5,
-      "name": "Season 3",
-      "cover": "https://picsum.photos/seed/rtv-s3007-e3/150/225",
-      "season_number": 3
     }
   ],
   "episodes": {
@@ -30,8 +16,8 @@
         "title": "Episode 1",
         "container_extension": "mkv",
         "info": {
-          "duration": "0:46:00",
-          "plot": "S1 E1 \u2014 A detective returns to her hometown and finds every greeting hides a secret.",
+          "duration": "0:38:00",
+          "plot": "S1 E1 \u2014 In a city of endless rain, an archivist discovers files that predict murders.",
           "movie_image": "https://picsum.photos/seed/rtv-s3007-e1-1/160/90"
         },
         "season": 1
@@ -42,8 +28,8 @@
         "title": "Episode 2",
         "container_extension": "mkv",
         "info": {
-          "duration": "0:52:00",
-          "plot": "S1 E2 \u2014 Two rival chefs share one kitchen and a decade-old feud.",
+          "duration": "0:50:00",
+          "plot": "S1 E2 \u2014 A taxi driver's nightly routes weave a map of the city's buried crimes.",
           "movie_image": "https://picsum.photos/seed/rtv-s3007-e1-2/160/90"
         },
         "season": 1
@@ -54,135 +40,71 @@
         "title": "Episode 3",
         "container_extension": "mkv",
         "info": {
-          "duration": "0:34:00",
-          "plot": "S1 E3 \u2014 A retiring locksmith receives keys to doors that were never built.",
+          "duration": "0:22:00",
+          "plot": "S1 E3 \u2014 The crew of a salvage ship stumbles on a wreck nobody wants found.",
           "movie_image": "https://picsum.photos/seed/rtv-s3007-e1-3/160/90"
         },
         "season": 1
-      }
-    ],
-    "2": [
-      {
-        "id": "ep_3007_2_1",
-        "episode_num": 1,
-        "title": "Episode 1",
-        "container_extension": "mkv",
-        "info": {
-          "duration": "0:41:00",
-          "plot": "S2 E1 \u2014 Two rival chefs share one kitchen and a decade-old feud.",
-          "movie_image": "https://picsum.photos/seed/rtv-s3007-e2-1/160/90"
-        },
-        "season": 2
       },
       {
-        "id": "ep_3007_2_2",
-        "episode_num": 2,
-        "title": "Episode 2",
-        "container_extension": "mkv",
-        "info": {
-          "duration": "0:36:00",
-          "plot": "S2 E2 \u2014 A detective returns to her hometown and finds every greeting hides a secret.",
-          "movie_image": "https://picsum.photos/seed/rtv-s3007-e2-2/160/90"
-        },
-        "season": 2
-      },
-      {
-        "id": "ep_3007_2_3",
-        "episode_num": 3,
-        "title": "Episode 3",
-        "container_extension": "mkv",
-        "info": {
-          "duration": "0:34:00",
-          "plot": "S2 E3 \u2014 A taxi driver's nightly routes weave a map of the city's buried crimes.",
-          "movie_image": "https://picsum.photos/seed/rtv-s3007-e2-3/160/90"
-        },
-        "season": 2
-      },
-      {
-        "id": "ep_3007_2_4",
+        "id": "ep_3007_1_4",
         "episode_num": 4,
         "title": "Episode 4",
-        "container_extension": "mkv",
-        "info": {
-          "duration": "0:43:00",
-          "plot": "S2 E4 \u2014 A family vineyard, a forged will, and a summer that will not end.",
-          "movie_image": "https://picsum.photos/seed/rtv-s3007-e2-4/160/90"
-        },
-        "season": 2
-      },
-      {
-        "id": "ep_3007_2_5",
-        "episode_num": 5,
-        "title": "Episode 5",
         "container_extension": "mkv",
         "info": {
           "duration": "0:26:00",
-          "plot": "S2 E5 \u2014 A family vineyard, a forged will, and a summer that will not end.",
-          "movie_image": "https://picsum.photos/seed/rtv-s3007-e2-5/160/90"
+          "plot": "S1 E4 \u2014 In a city of endless rain, an archivist discovers files that predict murders.",
+          "movie_image": "https://picsum.photos/seed/rtv-s3007-e1-4/160/90"
         },
-        "season": 2
-      }
-    ],
-    "3": [
-      {
-        "id": "ep_3007_3_1",
-        "episode_num": 1,
-        "title": "Episode 1",
-        "container_extension": "mkv",
-        "info": {
-          "duration": "0:54:00",
-          "plot": "S3 E1 \u2014 A taxi driver's nightly routes weave a map of the city's buried crimes.",
-          "movie_image": "https://picsum.photos/seed/rtv-s3007-e3-1/160/90"
-        },
-        "season": 3
+        "season": 1
       },
       {
-        "id": "ep_3007_3_2",
-        "episode_num": 2,
-        "title": "Episode 2",
-        "container_extension": "mkv",
-        "info": {
-          "duration": "0:43:00",
-          "plot": "S3 E2 \u2014 A detective returns to her hometown and finds every greeting hides a secret.",
-          "movie_image": "https://picsum.photos/seed/rtv-s3007-e3-2/160/90"
-        },
-        "season": 3
-      },
-      {
-        "id": "ep_3007_3_3",
-        "episode_num": 3,
-        "title": "Episode 3",
-        "container_extension": "mkv",
-        "info": {
-          "duration": "0:29:00",
-          "plot": "S3 E3 \u2014 A family vineyard, a forged will, and a summer that will not end.",
-          "movie_image": "https://picsum.photos/seed/rtv-s3007-e3-3/160/90"
-        },
-        "season": 3
-      },
-      {
-        "id": "ep_3007_3_4",
-        "episode_num": 4,
-        "title": "Episode 4",
-        "container_extension": "mkv",
-        "info": {
-          "duration": "0:33:00",
-          "plot": "S3 E4 \u2014 A family vineyard, a forged will, and a summer that will not end.",
-          "movie_image": "https://picsum.photos/seed/rtv-s3007-e3-4/160/90"
-        },
-        "season": 3
-      },
-      {
-        "id": "ep_3007_3_5",
+        "id": "ep_3007_1_5",
         "episode_num": 5,
         "title": "Episode 5",
         "container_extension": "mkv",
         "info": {
           "duration": "0:24:00",
-          "plot": "S3 E5 \u2014 The crew of a salvage ship stumbles on a wreck nobody wants found.",
-          "movie_image": "https://picsum.photos/seed/rtv-s3007-e3-5/160/90"
+          "plot": "S1 E5 \u2014 An astrophysicist hears a signal that answers her in her own voice.",
+          "movie_image": "https://picsum.photos/seed/rtv-s3007-e1-5/160/90"
         },
-        "season": 3
+        "season": 1
+      },
+      {
+        "id": "ep_3007_1_6",
+        "episode_num": 6,
+        "title": "Episode 6",
+        "container_extension": "mkv",
+        "info": {
+          "duration": "0:31:00",
+          "plot": "S1 E6 \u2014 A taxi driver's nightly routes weave a map of the city's buried crimes.",
+          "movie_image": "https://picsum.photos/seed/rtv-s3007-e1-6/160/90"
+        },
+        "season": 1
+      },
+      {
+        "id": "ep_3007_1_7",
+        "episode_num": 7,
+        "title": "Episode 7",
+        "container_extension": "mkv",
+        "info": {
+          "duration": "0:30:00",
+          "plot": "S1 E7 \u2014 A detective returns to her hometown and finds every greeting hides a secret.",
+          "movie_image": "https://picsum.photos/seed/rtv-s3007-e1-7/160/90"
+        },
+        "season": 1
+      },
+      {
+        "id": "ep_3007_1_8",
+        "episode_num": 8,
+        "title": "Episode 8",
+        "container_extension": "mkv",
+        "info": {
+          "duration": "0:41:00",
+          "plot": "S1 E8 \u2014 An astrophysicist hears a signal that answers her in her own voice.",
+          "movie_image": "https://picsum.photos/seed/rtv-s3007-e1-8/160/90"
+        },
+        "season": 1
       }
     ]
   }

@@ -1,13 +1,14 @@
 {
   "info": {
     "movie_image": "https://picsum.photos/seed/rtv-vod-big-5010/300/450",
-    "duration_secs": 8220,
-    "duration": "0:02:17:00",
+    "duration_secs": 8160,
+    "duration": "0:02:16:00",
     "plot": "A road movie: one van, four musicians, zero working radios.",
-    "cast": "Tomas Weber, Aisha Bello, Luc Moreau",
-    "director": "Aylin Demir",
-    "genre": "Thriller",
-    "releasedate": "2016-10-28",
-    "rating": "8.2"
+    "cast": "Ela Yilmaz, Marcus Chen, Priya Nair",
+    "director": "Jonas Berg",
+    "genre": "Sci-Fi",
+    "releasedate": "2021-01-01",
+    "rating": "6.3",
+    "youtube_trailer": "https://media.w3.org/2010/05/bunny/movie.mp4"
   }
 }

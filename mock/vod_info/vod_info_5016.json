@@ -1,13 +1,14 @@
 {
   "info": {
     "movie_image": "https://picsum.photos/seed/rtv-vod-big-5016/300/450",
-    "duration_secs": 8100,
-    "duration": "0:02:15:00",
-    "plot": "The last lighthouse keeper records a shipwreck that officially never happened.",
-    "cast": "Ela Yilmaz, Marcus Chen, Priya Nair",
-    "director": "Carmen Ruiz",
-    "genre": "Crime",
-    "releasedate": "2026-01-20",
-    "rating": "8.0"
+    "duration_secs": 8220,
+    "duration": "0:02:17:00",
+    "plot": "A night-shift baker witnesses a robbery and becomes the only credible witness.",
+    "cast": "Tomas Weber, Aisha Bello, Luc Moreau",
+    "director": "Aylin Demir",
+    "genre": "Comedy",
+    "releasedate": "2016-01-01",
+    "rating": "5.9",
+    "youtube_trailer": "https://media.w3.org/2010/05/bunny/trailer.mp4"
   }
 }

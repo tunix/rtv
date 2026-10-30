@@ -2,7 +2,7 @@
   "seasons": [
     {
       "air_date": "2021-01-15",
-      "episode_count": 7,
+      "episode_count": 5,
       "name": "Season 1",
       "cover": "https://picsum.photos/seed/rtv-s3000-e1/150/225",
       "season_number": 1
@@ -16,8 +16,8 @@
         "title": "Episode 1",
         "container_extension": "mkv",
         "info": {
-          "duration": "0:36:00",
-          "plot": "S1 E1 \u2014 A detective returns to her hometown and finds every greeting hides a secret.",
+          "duration": "0:55:00",
+          "plot": "S1 E1 \u2014 A taxi driver's nightly routes weave a map of the city's buried crimes.",
           "movie_image": "https://picsum.photos/seed/rtv-s3000-e1-1/160/90"
         },
         "season": 1
@@ -28,8 +28,8 @@
         "title": "Episode 2",
         "container_extension": "mkv",
         "info": {
-          "duration": "0:26:00",
-          "plot": "S1 E2 \u2014 A detective returns to her hometown and finds every greeting hides a secret.",
+          "duration": "0:35:00",
+          "plot": "S1 E2 \u2014 Two rival chefs share one kitchen and a decade-old feud.",
           "movie_image": "https://picsum.photos/seed/rtv-s3000-e1-2/160/90"
         },
         "season": 1
@@ -40,8 +40,8 @@
         "title": "Episode 3",
         "container_extension": "mkv",
         "info": {
-          "duration": "0:36:00",
-          "plot": "S1 E3 \u2014 The crew of a salvage ship stumbles on a wreck nobody wants found.",
+          "duration": "0:41:00",
+          "plot": "S1 E3 \u2014 A taxi driver's nightly routes weave a map of the city's buried crimes.",
           "movie_image": "https://picsum.photos/seed/rtv-s3000-e1-3/160/90"
         },
         "season": 1
@@ -52,8 +52,8 @@
         "title": "Episode 4",
         "container_extension": "mkv",
         "info": {
-          "duration": "0:24:00",
-          "plot": "S1 E4 \u2014 An astrophysicist hears a signal that answers her in her own voice.",
+          "duration": "0:45:00",
+          "plot": "S1 E4 \u2014 A retiring locksmith receives keys to doors that were never built.",
           "movie_image": "https://picsum.photos/seed/rtv-s3000-e1-4/160/90"
         },
         "season": 1
@@ -64,33 +64,9 @@
         "title": "Episode 5",
         "container_extension": "mkv",
         "info": {
-          "duration": "0:26:00",
-          "plot": "S1 E5 \u2014 Two rival chefs share one kitchen and a decade-old feud.",
+          "duration": "0:55:00",
+          "plot": "S1 E5 \u2014 A retiring locksmith receives keys to doors that were never built.",
           "movie_image": "https://picsum.photos/seed/rtv-s3000-e1-5/160/90"
-        },
-        "season": 1
-      },
-      {
-        "id": "ep_3000_1_6",
-        "episode_num": 6,
-        "title": "Episode 6",
-        "container_extension": "mkv",
-        "info": {
-          "duration": "0:39:00",
-          "plot": "S1 E6 \u2014 A retiring locksmith receives keys to doors that were never built.",
-          "movie_image": "https://picsum.photos/seed/rtv-s3000-e1-6/160/90"
-        },
-        "season": 1
-      },
-      {
-        "id": "ep_3000_1_7",
-        "episode_num": 7,
-        "title": "Episode 7",
-        "container_extension": "mkv",
-        "info": {
-          "duration": "0:35:00",
-          "plot": "S1 E7 \u2014 In a city of endless rain, an archivist discovers files that predict murders.",
-          "movie_image": "https://picsum.photos/seed/rtv-s3000-e1-7/160/90"
         },
         "season": 1
       }
