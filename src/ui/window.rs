@@ -290,10 +290,14 @@ impl Window {
                 imp.has_source.set(true);
                 imp.main_view.push(&*imp.browse_page);
                 win.toast("Mock source added — the real setup dialog comes later");
-            } else {
+            } else if crate::mock::AVAILABLE {
+                // Dev builds can point users at the mock mode. Release builds
+                // fold this branch away: there, the flag does not exist.
                 win.toast(
                     "Real source setup is not implemented yet — run `rtv --mock` to explore the UI with sample data",
                 );
+            } else {
+                win.toast("Real source setup is not implemented yet");
             }
         });
         self.add_action(&add_source);
