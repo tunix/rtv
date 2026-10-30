@@ -550,13 +550,20 @@ impl Window {
                 win.toggle_mute();
             }
         });
-        // Real pipelines take the volume directly from the slider.
+        // Real pipelines take the volume directly from the slider, and
+        // the level persists across sessions via GSettings.
         let win = self.downgrade();
         imp.volume_scale.connect_value_changed(move |scale| {
             if let Some(win) = win.upgrade() {
-                if let Some(pipeline) = win.imp().pipeline.borrow().as_ref() {
-                    pipeline.set_property("volume", scale.value());
+                let level = scale.value();
+                let i = win.imp();
+                if let Some(pipeline) = i.pipeline.borrow().as_ref() {
+                    pipeline.set_property("volume", level);
                 }
+                let settings = gio::Settings::new("io.github.tunix.rtv");
+                settings
+                    .set_double("volume", level)
+                    .expect("write volume setting");
             }
         });
         // The scrubber seeks the real pipeline when the user drags or
