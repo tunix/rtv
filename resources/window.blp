@@ -165,7 +165,7 @@ template $RtvWindow : Adw.ApplicationWindow {
                   Gtk.StackPage {
                     name: "empty";
                     child: Adw.StatusPage {
-                      icon-name: "emblem-favorite-symbolic";
+                      icon-name: "rtv-heart-symbolic";
                       title: _("No favorites yet");
                       description: _("Heart your favorite content to find it here.");
                     };
@@ -270,7 +270,7 @@ template $RtvWindow : Adw.ApplicationWindow {
 
                 child: Gtk.Box controls {
                   orientation: vertical;
-                  spacing: 6;
+                  spacing: 8;
                   styles ["controls"]
 
                   Gtk.Box scrub_row {
@@ -305,9 +305,9 @@ template $RtvWindow : Adw.ApplicationWindow {
 
                   Gtk.Box button_row {
                     spacing: 8;
-                    margin-start: 10;
-                    margin-end: 10;
-                    margin-bottom: 8;
+                    margin-start: 14;
+                    margin-end: 14;
+                    margin-bottom: 10;
                     valign: center;
 
                     Gtk.Button seek_back {

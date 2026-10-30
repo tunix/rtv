@@ -402,6 +402,11 @@ impl Window {
     fn setup_browse(&self) {
         let imp = self.imp();
 
+        // Restore the persisted volume into the slider (and the schema
+        // default is 1.0 — full). New pipelines pick it up from the scale.
+        let settings = gio::Settings::new("io.github.tunix.rtv");
+        imp.volume_scale.set_value(settings.double("volume"));
+
         // Source picker, valhalla-style, in the header title area. Switching
         // is silent for now; real per-source loading arrives with the
         // source/back-end work.
@@ -1142,7 +1147,7 @@ impl Window {
             Kind::Vod => "Movie · 1080p",
             Kind::Series => "Series",
         };
-        self.play_with_status(kind, id, name, status);
+        self.play_with_status(kind, id, name, name, status);
     }
 
     /// Playing an episode keeps the HEART on the parent series: the
@@ -1155,24 +1160,36 @@ impl Window {
         episode_number: i64,
         episode_title: &str,
     ) {
+        // The favorite target stays the SERIES; the player page names
+        // the episode and the status line locates it in the series.
         self.play_with_status(
             Kind::Series,
             series_id,
+            series_name,
             episode_title,
-            &format!("{series_name} · Season {season} · Episode {episode_number}"),
+            &format!("Episode · {series_name} · Season {season} · E{episode_number}"),
         );
     }
 
-    fn play_with_status(&self, kind: Kind, id: i64, name: &str, status: &str) {
+    fn play_with_status(
+        &self,
+        kind: Kind,
+        id: i64,
+        content_name: &str,
+        display_title: &str,
+        status: &str,
+    ) {
         let imp = self.imp();
+        // The favorite target is the CONTENT (series/movie/channel); the
+        // player title may name an episode or trailer within it.
         *imp.current.borrow_mut() = Some(FavKey {
             kind,
             id,
-            name: name.to_string(),
+            name: content_name.to_string(),
         });
         *imp.current_status.borrow_mut() = status.to_string();
-        imp.player_page.set_title(name);
-        imp.content_title.set_label(name);
+        imp.player_page.set_title(display_title);
+        imp.content_title.set_label(display_title);
         imp.content_status.set_label(status);
         imp.playing.set(false);
         self.set_play_icon(false);
@@ -1188,8 +1205,21 @@ impl Window {
     /// Trailers are the first real-playback step: playable video URLs run
     /// through GStreamer inside the player page; YouTube links still need
     /// a video backend and keep the demo player.
-    fn play_trailer(&self, kind: Kind, id: i64, title: &str, url: Option<String>) {
-        self.play_with_status(kind, id, title, "Trailer");
+    fn play_trailer(
+        &self,
+        kind: Kind,
+        id: i64,
+        content_name: &str,
+        label: &str,
+        url: Option<String>,
+    ) {
+        self.play_with_status(
+            kind,
+            id,
+            content_name,
+            &format!("{content_name} — {label}"),
+            "Trailer",
+        );
         let Some(url) = url else { return };
         if url.contains("youtube.com") || url.contains("youtu.be") {
             self.toast("YouTube trailer playback arrives with the video backend — the demo player shows for now");
@@ -2115,17 +2145,18 @@ fn trailers_section(
         thumbs.push(thumb.clone());
 
         // The playback heart keeps favoriting the movie/series itself.
-        entries.push((format!("{title} — Trailer {}", index + 1), trailer.clone()));
+        entries.push((format!("Trailer {}", index + 1), trailer.clone()));
     }
     // Routed via the list's row-activated signal (same mechanism as the
     // sidebar; per-row signals miss inert selection-NONE rows).
+    let content_title = title.to_string();
     let win = win.downgrade();
     list.connect_row_activated(move |_, row| {
-        let Some((trailer_title, url)) = entries.get(row.index() as usize) else {
+        let Some((label, url)) = entries.get(row.index() as usize) else {
             return;
         };
         if let Some(win) = win.upgrade() {
-            win.play_trailer(kind, id, trailer_title, Some(url.clone()));
+            win.play_trailer(kind, id, &content_title, label, Some(url.clone()));
         }
     });
     section.append(&list);
