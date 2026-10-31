@@ -1,9 +1,11 @@
 mod app;
+mod catalog;
 mod covers;
 mod details;
+mod ingest;
 mod ratings;
-mod sample;
 mod ui;
+mod xtream;
 
 use gtk::gio;
 use gtk::gio::prelude::*;

@@ -1,25 +1,16 @@
-//! Simulated sources layer behind the Settings dialog.
+//! Source management: the Settings dialog's Sources tab backed by the
+//! REAL ingestion pipeline. Adding a source kicks off `ingest::start`:
+//! progress callbacks update the rows live, failures surface as toasts +
+//! error rows, and the finished catalog lands on the window via
+//! `Window::apply_catalog`.
 //!
-//! Sources live in memory (`SourcesModel`): the "indexing" spinner, stats and
-//! category lists are all simulated data. The backend phase will replace the
-//! model with real fetching/persistence; the dialog layout stays.
-//!
-//! Layout mirrors valhalla's preferences: a plain [`adw::Dialog`] holding a
-//! sidebar (tab list) + a content pane. The Sources pane roots a
-//! NavigationView so "Add/Edit source" and the per-source detail (stats +
-//! category visibility) live as subpages inside the dialog.
-//!
-//! Cycle safety: every closure built here captures a [`Ctx`] of WEAK widget
-//! refs (plus the model), never a strong `SettingsUi` — the window caches
-//! the dialog, so strong widget refs in closures would form widget->closure
-//! cycles and leak popped pages.
-
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
-use std::time::Duration;
+//! Bulk category selection: each section group carries "All"/"None"
+//! buttons so users do not toggle hundreds of switches one by one.
 
 use adw::prelude::*;
 use gtk::glib;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use crate::ui::window::Window;
 
@@ -57,9 +48,9 @@ impl Section {
     }
 }
 
-/// Connection details of one source. Kept verbatim in memory; the backend
-/// phase moves credentials into the keyring (see AGENTS.md: never logged,
-/// never cached to disk).
+/// Connection details of one source. Kept verbatim in memory; the
+/// persistence phase moves credentials into the keyring (see AGENTS.md:
+/// never logged, never cached to disk).
 #[derive(Debug, Clone)]
 pub enum SourceKind {
     Xtream {
@@ -89,18 +80,53 @@ impl SourceKind {
     }
 }
 
-/// Simulated statistics shown once "indexing" finishes.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Stats {
+/// LIVE index state per source — one of the numbers the user asked to
+/// see in the logs and on the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceState {
+    /// Waiting for the fetch chain to finish.
+    Indexing,
+    /// Ingest finished; a catalog snapshot was published.
+    Ready,
+    /// Ingest failed (auth, network, parse). `message` explains.
+    Failed,
+}
+
+/// One configured source. `state` tracks the real ingest; `snapshot`
+/// holds the catalog THIS source produced so switching sources can
+/// re-publish it without re-fetching.
+#[derive(Debug, Clone)]
+pub struct Source {
+    pub id: u64,
+    pub name: String,
+    pub kind: SourceKind,
+    pub state: SourceState,
+    pub failure: Option<String>,
+    /// Counters from the last ingest (0 while indexing).
     pub live_cats: u32,
     pub live_items: u32,
     pub vod_cats: u32,
     pub vod_items: u32,
     pub series_cats: u32,
     pub series_items: u32,
+    /// Whether each section's categories are visible. Indexed by
+    /// Section::all() position; per-category flags live in the catalog
+    /// snapshot (Category.visible) — the model carries the fast path.
+    pub section_hidden: [bool; 3],
+    /// The catalog this source produced (None until the ingest finished;
+    /// kept so switching sources can re-publish without re-fetching).
+    pub snapshot: Option<std::rc::Rc<crate::catalog::Catalog>>,
 }
 
-impl Stats {
+impl Source {
+    pub fn section(&self, section: Section) -> (u32, u32) {
+        match section {
+            Section::Live => (self.live_cats, self.live_items),
+            Section::Vod => (self.vod_cats, self.vod_items),
+            Section::Series => (self.series_cats, self.series_items),
+        }
+    }
+
     fn total_cats(&self) -> u32 {
         self.live_cats + self.vod_cats + self.series_cats
     }
@@ -109,37 +135,12 @@ impl Stats {
         self.live_items + self.vod_items + self.series_items
     }
 
-    fn section(&self, section: Section) -> (u32, u32) {
-        match section {
-            Section::Live => (self.live_cats, self.live_items),
-            Section::Vod => (self.vod_cats, self.vod_items),
-            Section::Series => (self.series_cats, self.series_items),
-        }
+    fn is_indexing(&self) -> bool {
+        self.state == SourceState::Indexing
     }
 }
 
-/// A top-level category with a visibility flag (the backend phase will
-/// wire these switches into the grid-rendering filters).
-#[derive(Debug, Clone)]
-pub struct SimCategory {
-    pub name: String,
-    pub section: Section,
-    pub visible: bool,
-}
-
-/// One configured source. `indexing` is the stand-in for the async
-/// indexing step.
-#[derive(Debug, Clone)]
-pub struct Source {
-    pub id: u64,
-    pub name: String,
-    pub kind: SourceKind,
-    pub indexing: bool,
-    pub stats: Option<Stats>,
-    pub cats: Vec<SimCategory>,
-}
-
-/// Shared in-memory source list, owned by the window and read/written by the
+/// Shared source list, owned by the window and read/written by the
 /// settings dialog.
 #[derive(Debug, Default)]
 pub struct SourcesModel {
@@ -156,13 +157,7 @@ impl SourcesModel {
         self.items.borrow().iter().find(|s| s.id == id).cloned()
     }
 
-    pub fn clear(&self) {
-        self.items.borrow_mut().clear();
-        self.next_id.set(0);
-    }
-
-    /// Reserves the next id, hands it to the factory (stats are seeded
-    /// from it) and appends the result.
+    /// Reserves the next id, hands it to the factory and appends.
     pub fn add(&self, source_factory: impl FnOnce(u64) -> Source) -> u64 {
         let id = self.next_id.get();
         self.next_id.set(id + 1);
@@ -181,23 +176,41 @@ impl SourcesModel {
         self.items.borrow_mut().retain(|s| s.id != id);
     }
 
-    /// Simulated indexing: flips the source to ready.
-    pub fn set_ready(&self, id: u64) {
+    /// Patch one source in place with a mutable closure.
+    pub fn update(&self, id: u64, f: impl FnOnce(&mut Source)) {
         let mut items = self.items.borrow_mut();
         if let Some(source) = items.iter_mut().find(|s| s.id == id) {
-            source.indexing = false;
+            f(source);
         }
     }
 
-    /// Toggles one category's visibility flag.
-    pub fn set_category_visible(&self, id: u64, section: Section, name: &str, visible: bool) {
-        let mut items = self.items.borrow_mut();
-        if let Some(source) = items.iter_mut().find(|s| s.id == id) {
-            for cat in &mut source.cats {
-                if cat.section == section && cat.name == name {
-                    cat.visible = visible;
-                }
-            }
+    /// Flip one section's whole visibility (bulk All/None).
+    pub fn set_section_visible(&self, id: u64, section: Section, visible: bool) {
+        self.update(id, |source| {
+            source.section_hidden[section.index()] = !visible;
+        });
+    }
+
+    /// Category-level visibility lives on the catalog snapshot (window);
+    /// the model keeps no per-category copy.
+    pub fn set_category_visible(&self, _id: u64, _section: Section, _name: &str, _visible: bool) {}
+}
+
+impl Section {
+    /// The catalog Kind this section maps to.
+    pub fn kind(self) -> crate::catalog::Kind {
+        match self {
+            Self::Live => crate::catalog::Kind::Live,
+            Self::Vod => crate::catalog::Kind::Vod,
+            Self::Series => crate::catalog::Kind::Series,
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Live => 0,
+            Self::Vod => 1,
+            Self::Series => 2,
         }
     }
 }
@@ -224,160 +237,60 @@ fn fmt_count(n: u32) -> String {
     out
 }
 
-/// Row subtitle: kind + catalog size, or the indexing state.
+/// Snapshot-derived per-section counters (the settings rows' numbers).
+struct SectionCounts {
+    live_cats: u32,
+    live_items: u32,
+    vod_cats: u32,
+    vod_items: u32,
+    series_cats: u32,
+    series_items: u32,
+}
+
+impl SectionCounts {
+    fn of(catalog: &crate::catalog::Catalog) -> Self {
+        let cats = |kind: crate::catalog::Kind| {
+            catalog.categories.iter().filter(|c| c.kind == kind).count() as u32
+        };
+        let items = |kind: crate::catalog::Kind| {
+            catalog.items.iter().filter(|i| i.kind == kind).count() as u32
+        };
+        Self {
+            live_cats: cats(crate::catalog::Kind::Live),
+            live_items: items(crate::catalog::Kind::Live),
+            vod_cats: cats(crate::catalog::Kind::Vod),
+            vod_items: items(crate::catalog::Kind::Vod),
+            series_cats: cats(crate::catalog::Kind::Series),
+            series_items: items(crate::catalog::Kind::Series),
+        }
+    }
+}
+
+/// Row subtitle: state-aware — indexing with live counts, failure reason
+/// or the ready stats line.
 fn source_subtitle(source: &Source) -> String {
-    match (&source.stats, source.indexing) {
-        (Some(stats), false) => format!(
+    match source.state {
+        SourceState::Indexing => format!(
+            "{} · Loading… ({} categories · {} contents so far)",
+            source.kind.label(),
+            fmt_count(source.total_cats()),
+            fmt_count(source.total_items())
+        ),
+        SourceState::Failed => format!(
+            "{} · Failed{}",
+            source.kind.label(),
+            source
+                .failure
+                .as_deref()
+                .map(|msg| format!(" — {msg}"))
+                .unwrap_or_default()
+        ),
+        SourceState::Ready => format!(
             "{} · {} categories · {} contents",
             source.kind.label(),
-            fmt_count(stats.total_cats()),
-            fmt_count(stats.total_items())
+            fmt_count(source.total_cats()),
+            fmt_count(source.total_items())
         ),
-        _ => format!("{} · Indexing…", source.kind.label()),
-    }
-}
-
-/// Counts entries in one of the local dumps (samples/); stats
-/// prefer real local data so numbers look plausible.
-fn count_json(path: &str) -> Option<u32> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    match value {
-        serde_json::Value::Array(items) => Some(items.len() as u32),
-        serde_json::Value::Object(map) => Some(map.len() as u32),
-        _ => None,
-    }
-}
-
-fn local_counts(data_dir: &str) -> Option<[u32; 6]> {
-    let files = [
-        "live_categories.json",
-        "live_streams.json",
-        "vod_categories.json",
-        "vod_streams.json",
-        "series_categories.json",
-        "series.json",
-    ];
-    let mut out = [0u32; 6];
-    for (i, file) in files.iter().enumerate() {
-        out[i] = count_json(&format!("{data_dir}/{file}"))?;
-    }
-    Some(out)
-}
-
-/// Category names for one section from the local dumps (or canned).
-fn local_category_names(data_dir: &str, section: Section) -> Vec<String> {
-    let file = match section {
-        Section::Live => "live_categories.json",
-        Section::Vod => "vod_categories.json",
-        Section::Series => "series_categories.json",
-    };
-    let fallback = || -> Vec<String> {
-        let names: &[&str] = match section {
-            Section::Live => &[
-                "Sports",
-                "News",
-                "Entertainment",
-                "Movies HD",
-                "Documentary",
-                "Kids",
-            ],
-            Section::Vod => &["Feature Films", "Independent", "Classics", "Documentary"],
-            Section::Series => &["Scripted", "Reality", "Animation", "Documentary Series"],
-        };
-        names.iter().map(|s| s.to_string()).collect()
-    };
-    let text = match std::fs::read_to_string(format!("{data_dir}/{file}")) {
-        Ok(text) => text,
-        Err(_) => return fallback(),
-    };
-    let entries: Vec<serde_json::Value> = match serde_json::from_str(&text) {
-        Ok(entries) => entries,
-        Err(_) => return fallback(),
-    };
-    let names: Vec<String> = entries
-        .iter()
-        .filter_map(|e| e.get("category_name")?.as_str().map(String::from))
-        .collect();
-    if names.is_empty() {
-        fallback()
-    } else {
-        names
-    }
-}
-
-/// Canned M3U group names (the M3U backend is a stub).
-fn sim_m3u_groups() -> Vec<String> {
-    ["Sports", "News", "Entertainment", "Kids", "Music", "24/7"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
-}
-
-/// Simulated stats for a fresh source: item counts scaled from the local
-/// dump sizes so the UX resembles a real provider's catalog size.
-fn sim_stats(id: u64, kind: &SourceKind, data_dir: &str) -> Stats {
-    if matches!(kind, SourceKind::M3U { .. }) {
-        let scale = 1 + (id % 4) as u32;
-        let groups = sim_m3u_groups().len() as u32;
-        return Stats {
-            live_cats: groups,
-            live_items: 4_200 * scale,
-            vod_cats: groups / 2,
-            vod_items: 800 * scale,
-            series_cats: groups / 2,
-            series_items: 1_500 * scale,
-        };
-    }
-    let counts = local_counts(data_dir).unwrap_or([24, 19, 9, 26, 8, 24]);
-    let factor = |raw: u32, salt: u32| -> u32 {
-        let scale = 250 + ((id as u32).wrapping_mul(617) + salt) % 1200;
-        raw * scale
-    };
-    Stats {
-        live_cats: counts[0],
-        live_items: factor(counts[1], 0),
-        vod_cats: counts[2],
-        vod_items: factor(counts[3], 131),
-        series_cats: counts[4],
-        series_items: factor(counts[5], 389),
-    }
-}
-
-/// Builds a fresh in-memory source (still indexing, stats pre-computed).
-fn new_source(id: u64, name: &str, kind: SourceKind) -> Source {
-    let data_dir = "samples";
-    let stats = sim_stats(id, &kind, data_dir);
-    let cats = match kind {
-        SourceKind::M3U { .. } => sim_m3u_groups()
-            .into_iter()
-            .map(|name| SimCategory {
-                name,
-                section: Section::Live,
-                visible: true,
-            })
-            .collect(),
-        SourceKind::Xtream { .. } => Section::all()
-            .iter()
-            .flat_map(|&section| {
-                local_category_names(data_dir, section)
-                    .into_iter()
-                    .map(|name| SimCategory {
-                        name,
-                        section,
-                        visible: true,
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect(),
-    };
-    Source {
-        id,
-        name: name.to_string(),
-        kind,
-        indexing: true,
-        stats: Some(stats),
-        cats,
     }
 }
 
@@ -449,11 +362,9 @@ impl Ctx {
     }
 
     fn build_row(&self, source: &Source) -> gtk::ListBoxRow {
-        // Source names and the stats subtitle come straight from user
-        // input and panel data, which can carry a bare "&" — Adwaita
-        // parses row titles/subtitles as Pango markup, and an unparsed
-        // "&" logs a GTK warning and drops the rest of the text. Plain
-        // text wins here.
+        // Source names and subtitles carry user input / panel data, which
+        // can include a bare "&" — Adwaita parses row titles as Pango
+        // markup, so plain text wins (see the PR #20 lesson).
         let row = adw::ActionRow::builder()
             .title(&source.name)
             .subtitle(source_subtitle(source))
@@ -465,11 +376,20 @@ impl Ctx {
             .orientation(gtk::Orientation::Horizontal)
             .spacing(6)
             .build();
-        if source.indexing {
+        if source.is_indexing() {
             suffix.append(
                 &gtk::Spinner::builder()
                     .spinning(true)
                     .valign(gtk::Align::Center)
+                    .build(),
+            );
+        }
+        if source.state == SourceState::Failed {
+            suffix.append(
+                &gtk::Image::builder()
+                    .icon_name("dialog-warning-symbolic")
+                    .valign(gtk::Align::Center)
+                    .css_classes(["warning"])
                     .build(),
             );
         }
@@ -485,6 +405,20 @@ impl Ctx {
             .valign(gtk::Align::Center)
             .css_classes(["flat"])
             .build();
+        // Retry button on failed sources: re-runs the ingest with the
+        // same credentials without re-typing anything.
+        if source.state == SourceState::Failed {
+            let retry = gtk::Button::builder()
+                .icon_name("view-refresh-symbolic")
+                .tooltip_text("Retry loading")
+                .valign(gtk::Align::Center)
+                .css_classes(["flat"])
+                .build();
+            let retry_ctx = self.clone();
+            let retry_id = source.id;
+            retry.connect_clicked(move |_| retry_ctx.start_ingest(retry_id));
+            suffix.append(&retry);
+        }
         suffix.append(&edit);
         suffix.append(&trash);
         row.add_suffix(&suffix);
@@ -500,16 +434,15 @@ impl Ctx {
         let trash_ctx = self.clone();
         trash.connect_clicked(move |_| trash_ctx.confirm_delete(id));
 
-        // GtkListBox's row activation does not fire reliably for AdwActionRow
-        // here (the click gesture is consumed before the list's activation),
-        // so the empty row area is activated explicitly: a click that is not
-        // on the suffix buttons opens the detail page.
+        // GtkListBox's row activation does not fire reliably for
+        // AdwActionRow (the click gesture is consumed first), so the
+        // empty row area is activated explicitly — the same workaround
+        // as before, minus clicks on the suffix buttons.
         let click_ctx = self.clone();
         let click = gtk::GestureClick::new();
         click.set_button(gtk::gdk::BUTTON_PRIMARY);
         let row_weak = row.downgrade();
         click.connect_released(move |_, _, x, _| {
-            // Ignore clicks that land on the suffix buttons.
             let Some(row) = row_weak.upgrade() else {
                 return;
             };
@@ -523,29 +456,89 @@ impl Ctx {
         row.into()
     }
 
-    /// Simulated indexing: the source becomes ready after a short delay; the
-    /// list (and an open detail page) re-render. The callback holds only the
-    /// Ctx, so a deleted source no-ops.
-    fn schedule_indexing(&self, id: u64) {
+    /// The REAL ingest: fires `ingest::start` with this source's
+    /// credentials. Progress callbacks re-render the row subtitle with
+    /// live counts (cheap: rows are rebuilt only on stage boundaries, a
+    /// handful of times per ingest — not per item). Completion publishes
+    /// the catalog to the window and flips the state to Ready.
+    fn start_ingest(&self, id: u64) {
+        let Some(source) = self.model.get(id) else {
+            return;
+        };
+        tracing::info!(target: "rtv::ingest", id, name = %source.name, "ingest kicked off from settings");
+
+        self.model.update(id, |s| {
+            s.state = SourceState::Indexing;
+            s.failure = None;
+            s.live_cats = 0;
+            s.live_items = 0;
+            s.vod_cats = 0;
+            s.vod_items = 0;
+            s.series_cats = 0;
+            s.series_items = 0;
+        });
+        self.refresh();
+        self.sync();
+
+        // The dialog's owner (window) receives the finished catalog even
+        // if the settings dialog got closed meanwhile — weak refs keep
+        // this safe: window upgrade wins, snapshot lands.
+        let kind = source.kind.clone();
         let ctx = self.clone();
-        glib::timeout_add_local_once(Duration::from_millis(2200 + (id % 3) * 900), move || {
-            let Some(source) = ctx.model.get(id) else {
-                return;
-            };
-            if !source.indexing {
-                return;
-            }
-            ctx.model.set_ready(id);
+        let on_progress = move |progress: &crate::ingest::Progress| {
+            ctx.model.update(id, |s| {
+                s.live_cats = progress.live_cats as u32;
+                s.live_items = progress.live_items as u32;
+                s.vod_cats = progress.vod_cats as u32;
+                s.vod_items = progress.vod_items as u32;
+                s.series_cats = progress.series_cats as u32;
+                s.series_items = progress.series_items as u32;
+            });
             ctx.refresh();
-            if ctx.detail.open_id.get() == Some(id) {
-                ctx.rebuild_detail(id);
+        };
+        let ctx = self.clone();
+        let win_weak = self.win.clone();
+        crate::ingest::start(&kind, on_progress, move |outcome| match outcome {
+            crate::ingest::IngestOutcome::Done(catalog) => {
+                tracing::info!(
+                    target: "rtv::ingest",
+                    id,
+                    "ingest DONE — publishing snapshot to window"
+                );
+                let counts = SectionCounts::of(&catalog);
+                let snapshot = std::rc::Rc::new(catalog.clone());
+                ctx.model.update(id, |s| {
+                    s.state = SourceState::Ready;
+                    s.snapshot = Some(snapshot.clone());
+                    s.live_cats = counts.live_cats;
+                    s.live_items = counts.live_items;
+                    s.vod_cats = counts.vod_cats;
+                    s.vod_items = counts.vod_items;
+                    s.series_cats = counts.series_cats;
+                    s.series_items = counts.series_items;
+                });
+                if let Some(win) = win_weak.upgrade() {
+                    win.apply_catalog(catalog);
+                    win.sync_sources_ui();
+                }
+                ctx.refresh();
+                if let Some(updated) = ctx.model.get(id) {
+                    ctx.toast(&format!(
+                        "Source ready — {} categories, {} contents",
+                        fmt_count(updated.total_cats()),
+                        fmt_count(updated.total_items())
+                    ));
+                }
             }
-            if let Some(stats) = source.stats {
-                ctx.toast(&format!(
-                    "Source ready — {} categories, {} contents",
-                    fmt_count(stats.total_cats()),
-                    fmt_count(stats.total_items())
-                ));
+            crate::ingest::IngestOutcome::Failed(message) => {
+                tracing::error!(target: "rtv::ingest", id, reason = %message, "ingest FAILED");
+                ctx.model.update(id, |s| {
+                    s.state = SourceState::Failed;
+                    s.failure = Some(message.clone());
+                    s.snapshot = None;
+                });
+                ctx.refresh();
+                ctx.toast(&format!("Source failed: {message}"));
             }
         });
     }
@@ -799,9 +792,23 @@ impl Ctx {
                     save_ctx.toast("Source saved");
                 }
                 None => {
-                    let id = save_ctx.model.add(|id| new_source(id, &name, kind));
-                    save_ctx.toast("Source added — indexing…");
-                    save_ctx.schedule_indexing(id);
+                    let id = save_ctx.model.add(|id| Source {
+                        id,
+                        name: name.clone(),
+                        kind: kind.clone(),
+                        state: SourceState::Indexing,
+                        failure: None,
+                        live_cats: 0,
+                        live_items: 0,
+                        vod_cats: 0,
+                        vod_items: 0,
+                        series_cats: 0,
+                        series_items: 0,
+                        section_hidden: [false; 3],
+                        snapshot: None,
+                    });
+                    save_ctx.toast("Source added — loading…");
+                    save_ctx.start_ingest(id);
                 }
             }
             save_ctx.sync();
@@ -877,17 +884,38 @@ impl Ctx {
             .build();
         page.add(&overview);
 
-        if source.indexing {
+        if source.is_indexing() {
             let row = adw::ActionRow::builder()
-                .title("Indexing…")
-                .subtitle("Stats and categories appear here when the source is ready.")
+                .title("Loading…")
+                .subtitle(format!(
+                    "{} categories · {} contents fetched so far. The page updates when the load finishes.",
+                    fmt_count(source.total_cats()),
+                    fmt_count(source.total_items())
+                ))
                 .activatable(false)
                 .build();
             row.add_prefix(&gtk::Spinner::builder().spinning(true).build());
             overview.add(&row);
-        } else if let Some(stats) = source.stats {
+        } else if source.state == SourceState::Failed {
+            let row = adw::ActionRow::builder()
+                .title("Loading failed")
+                .subtitle(
+                    source
+                        .failure
+                        .as_deref()
+                        .unwrap_or("The source could not be loaded."),
+                )
+                .activatable(false)
+                .build();
+            row.add_prefix(
+                &gtk::Image::builder()
+                    .icon_name("dialog-warning-symbolic")
+                    .build(),
+            );
+            overview.add(&row);
+        } else {
             for section in Section::all() {
-                let (cats, items) = stats.section(section);
+                let (cats, items) = source.section(section);
                 let row = adw::ActionRow::builder()
                     .title(section.label())
                     .subtitle(format!(
@@ -902,34 +930,77 @@ impl Ctx {
             }
         }
 
-        if !source.indexing {
+        // Category visibility groups. Bulk selection lives in the group
+        // header: All / None buttons per section, so a provider with
+        // hundreds of categories stays manageable.
+        if source.state == SourceState::Ready {
+            let catalog = self.win.upgrade().map(|w| w.catalog_rc());
             for section in Section::all() {
-                let cats: Vec<_> = source
-                    .cats
+                let Some(catalog) = &catalog else { break };
+                let cats: Vec<&crate::catalog::Category> = catalog
+                    .categories
                     .iter()
-                    .filter(|c| c.section == section)
+                    .filter(|c| c.kind == section.kind())
                     .collect();
                 if cats.is_empty() {
                     continue;
                 }
+                let visible_count = cats.iter().filter(|c| c.visible).count();
+
                 let group = adw::PreferencesGroup::builder()
                     .title(format!("{} categories", section.label()))
-                    .description("Hidden categories stay in the source but are skipped when rendering content grids.")
+                    .description(format!(
+                        "{visible_count} of {} visible. Hidden categories are skipped by browse and search.",
+                        cats.len()
+                    ))
                     .build();
+
+                // Bulk-select header row: All / None.
+                let bulk_row = adw::ActionRow::builder()
+                    .title("Show all categories")
+                    .activatable(false)
+                    .build();
+                let all_btn = gtk::Button::builder()
+                    .label("All")
+                    .valign(gtk::Align::Center)
+                    .css_classes(["flat"])
+                    .build();
+                let none_btn = gtk::Button::builder()
+                    .label("None")
+                    .valign(gtk::Align::Center)
+                    .css_classes(["flat"])
+                    .build();
+                bulk_row.add_suffix(&all_btn);
+                bulk_row.add_suffix(&none_btn);
+                group.add(&bulk_row);
+                let bulk_ctx = self.clone();
+                let section_all = section;
+                all_btn.connect_clicked(move |_| {
+                    tracing::info!(target: "rtv::ui", section = ?section_all, "bulk: show all");
+                    bulk_ctx.set_section_visible_bulk(section_all, true);
+                });
+                let none_ctx = self.clone();
+                none_btn.connect_clicked(move |_| {
+                    tracing::info!(target: "rtv::ui", section = ?section_all, "bulk: hide all");
+                    none_ctx.set_section_visible_bulk(section_all, false);
+                });
+
                 for cat in cats {
                     // Panel category names can carry a bare "&"; row
                     // titles parse as Pango markup unless use_markup is
-                    // off (same fix as the source list rows).
+                    // off (the PR #20 lesson — keep it everywhere).
                     let switch_row = adw::SwitchRow::builder()
                         .title(&cat.name)
                         .use_markup(false)
                         .active(cat.visible)
                         .build();
-                    let ctx = self.clone();
-                    let (id, name) = (source.id, cat.name.clone());
+                    let win_weak = self.win.clone();
+                    let kind = section.kind();
+                    let cat_id = cat.id.clone();
                     switch_row.connect_active_notify(move |row| {
-                        ctx.model
-                            .set_category_visible(id, section, &name, row.is_active());
+                        if let Some(win) = win_weak.upgrade() {
+                            win.set_category_visible(kind, &cat_id, row.is_active());
+                        }
                     });
                     group.add(&switch_row);
                 }
@@ -947,6 +1018,21 @@ impl Ctx {
         page.add(&danger);
 
         content.append(&page);
+    }
+
+    /// Bulk All/None for one section: delegates to the window, which
+    /// patches the snapshot AND re-renders everything. Then rebuilds
+    /// this detail page so switches reflect the new state.
+    fn set_section_visible_bulk(&self, section: Section, visible: bool) {
+        let Some(source) = self.detail.open_id.get() else {
+            return;
+        };
+        let id = source;
+        self.model.set_section_visible(id, section, visible);
+        if let Some(win) = self.win.upgrade() {
+            win.set_section_visible(section.kind(), visible);
+        }
+        self.rebuild_detail(id);
     }
 }
 
@@ -1194,6 +1280,21 @@ impl SettingsUi {
 mod tests {
     use super::*;
 
+    fn xtream_source() -> SourceKind {
+        SourceKind::Xtream {
+            server: "http://panel.example:80".into(),
+            username: "u".into(),
+            password: "p".into(),
+        }
+    }
+
+    fn m3u_source() -> SourceKind {
+        SourceKind::M3U {
+            url: "http://example.com/list.m3u".into(),
+            epg: String::new(),
+        }
+    }
+
     #[test]
     fn fmt_count_inserts_thousands_separators() {
         assert_eq!(fmt_count(0), "0");
@@ -1204,30 +1305,32 @@ mod tests {
     }
 
     #[test]
-    fn model_add_replace_remove_roundtrip() {
+    fn model_add_update_remove_roundtrip() {
         let model = SourcesModel::default();
-        let id = model.add(|id| {
-            new_source(
-                id,
-                "A",
-                SourceKind::M3U {
-                    url: "u".into(),
-                    epg: String::new(),
-                },
-            )
+        let id = model.add(|id| Source {
+            id,
+            name: "A".into(),
+            kind: m3u_source(),
+            state: SourceState::Indexing,
+            failure: None,
+            live_cats: 0,
+            live_items: 0,
+            vod_cats: 0,
+            vod_items: 0,
+            series_cats: 0,
+            series_items: 0,
+            section_hidden: [false; 3],
+            snapshot: None,
         });
         let added = model.get(id).expect("added");
         assert_eq!(added.name, "A");
-        assert!(added.indexing);
-        assert!(added.stats.is_some());
+        assert!(added.is_indexing());
 
-        model.set_ready(id);
-        assert!(!model.get(id).expect("ready").indexing);
-
-        let mut updated = model.get(id).expect("ready");
-        updated.name = "B".into();
-        model.replace(updated);
-        assert_eq!(model.get(id).expect("replaced").name, "B");
+        model.update(id, |s| {
+            s.state = SourceState::Ready;
+            s.live_items = 42;
+        });
+        assert_eq!(model.get(id).expect("ready").live_items, 42);
 
         model.remove(id);
         assert!(model.get(id).is_none());
@@ -1235,66 +1338,58 @@ mod tests {
     }
 
     #[test]
-    fn set_category_visible_flips_only_one() {
+    fn section_visible_bulk_flips_one_section_only() {
         let model = SourcesModel::default();
-        let id = model.add(|id| {
-            new_source(
-                id,
-                "A",
-                SourceKind::Xtream {
-                    server: "https://x".into(),
-                    username: "u".into(),
-                    password: "p".into(),
-                },
-            )
+        let id = model.add(|id| Source {
+            id,
+            name: "X".into(),
+            kind: xtream_source(),
+            state: SourceState::Ready,
+            failure: None,
+            live_cats: 3,
+            live_items: 10,
+            vod_cats: 2,
+            vod_items: 5,
+            series_cats: 1,
+            series_items: 1,
+            section_hidden: [false; 3],
+            snapshot: None,
         });
-        let live_first = model
-            .get(id)
-            .expect("source")
-            .cats
-            .iter()
-            .find(|c| c.section == Section::Live)
-            .expect("live category")
-            .name
-            .clone();
-        model.set_category_visible(id, Section::Live, &live_first, false);
+        model.set_section_visible(id, Section::Live, false);
         let source = model.get(id).expect("source");
-        let live = source
-            .cats
-            .iter()
-            .filter(|c| c.section == Section::Live)
-            .count();
-        let hidden_live = source
-            .cats
-            .iter()
-            .filter(|c| c.section == Section::Live && !c.visible)
-            .count();
-        assert_eq!(hidden_live, 1);
-        let hidden_total = source.cats.iter().filter(|c| !c.visible).count();
-        assert_eq!(hidden_total, 1);
-        assert!(live > 0);
+        assert!(source.section_hidden[0]);
+        assert!(!source.section_hidden[1]);
+        assert!(!source.section_hidden[2]);
+        model.set_section_visible(id, Section::Live, true);
+        assert!(!model.get(id).expect("source").section_hidden[0]);
     }
 
     #[test]
-    fn source_subtitle_covers_indexing_and_ready() {
-        let model = SourcesModel::default();
-        let id = model.add(|id| {
-            new_source(
-                id,
-                "A",
-                SourceKind::Xtream {
-                    server: "s".into(),
-                    username: "u".into(),
-                    password: "p".into(),
-                },
-            )
-        });
-        let indexing = model.get(id).expect("source");
-        assert!(source_subtitle(&indexing).ends_with("Indexing…"));
-        model.set_ready(id);
-        let ready = model.get(id).expect("source");
-        let subtitle = source_subtitle(&ready);
+    fn subtitles_cover_all_states() {
+        let mut source = Source {
+            id: 1,
+            name: "N".into(),
+            kind: xtream_source(),
+            state: SourceState::Indexing,
+            failure: None,
+            live_cats: 1,
+            live_items: 2,
+            vod_cats: 0,
+            vod_items: 0,
+            series_cats: 0,
+            series_items: 0,
+            section_hidden: [false; 3],
+            snapshot: None,
+        };
+        assert!(source_subtitle(&source).contains("Loading…"));
+
+        source.state = SourceState::Ready;
+        let subtitle = source_subtitle(&source);
         assert!(subtitle.starts_with("Xtream Codes"));
         assert!(subtitle.contains("categories"));
+
+        source.state = SourceState::Failed;
+        source.failure = Some("boom".into());
+        assert!(source_subtitle(&source).contains("Failed — boom"));
     }
 }
