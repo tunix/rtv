@@ -2,9 +2,24 @@
 <schemalist>
   <schema id="io.github.tunix.rtv" path="/io/github/tunix/rtv/">
     <key name="last-source" type="s">
-      <default>"xtream"</default>
+      <default>""</default>
       <summary>Active source</summary>
-      <description>Identifier of the source selected when the app last ran.</description>
+      <description>Identifier of the source selected when the app last ran. Empty means none.</description>
+    </key>
+    <key name="selected-category-live" type="s">
+      <default>""</default>
+      <summary>Selected Live TV category per active source</summary>
+      <description>Category id last opened in the Live TV section.</description>
+    </key>
+    <key name="selected-category-vod" type="s">
+      <default>""</default>
+      <summary>Selected Movies category per active source</summary>
+      <description>Category id last opened in the Movies section.</description>
+    </key>
+    <key name="selected-category-series" type="s">
+      <default>""</default>
+      <summary>Selected Series category per active source</summary>
+      <description>Category id last opened in the Series section.</description>
     </key>
     <key name="volume" type="d">
       <default>1.0</default>

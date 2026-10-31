@@ -35,7 +35,7 @@ use gtk::glib;
 use serde_json::Value;
 use soup::prelude::*;
 
-use crate::sample::Kind;
+use crate::catalog::Kind;
 
 /// Fetched ratings for one title. Fields stay `None` when no source
 /// provides them (the UI then falls back to the panel rating / "N/A").

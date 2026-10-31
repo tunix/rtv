@@ -1,17 +1,15 @@
 //! On-demand content details: Xtream `get_series_info` and `get_vod_info`
-//! calls against the panel, mirroring `covers.rs`: libsoup3 on the GLib
-//! main loop, results delivered through a callback, in-memory caching,
-//! graceful failure — never blocking, never crashing.
+//! calls against the ACTIVE source's panel, mirroring `covers.rs`:
+//! libsoup3 on the GLib main loop, results delivered through a callback,
+//! in-memory caching, graceful failure — never blocking, never crashing.
 //!
-//! Requests and
-//! credentials come from `samples/user_info.json` (gitignored, still
-//! optional): the values are NEVER logged, printed or persisted — only
-//! placed into the request URL in memory.
+//! Credentials come from the active source (the window supplies a
+//! provider closure): the values are NEVER logged, printed or persisted —
+//! only placed into the request URL in memory.
 
-use std::{cell::RefCell, collections::HashMap, fs, sync::OnceLock};
+use std::{cell::RefCell, collections::HashMap};
 
 use gtk::glib;
-use serde::Deserialize;
 use serde_json::Value;
 use soup::prelude::*;
 
@@ -26,61 +24,28 @@ thread_local! {
     static VOD_CACHE: RefCell<HashMap<i64, VodInfo>> = RefCell::new(HashMap::new());
 }
 
-/// Parsed sample credentials + server address, loaded once. Holds ONLY
-/// the composed base URL; nothing here may ever reach a log or the disk.
-struct Server {
-    base_url: String,
+/// The active source's credentials, installed by the window (the model
+/// lives there). Called per request — the closure reads the CURRENT
+/// selection, so detail fetches follow source switches.
+/// The per-call credentials lookup installed by the window.
+type CredsProvider = Box<dyn Fn() -> Option<crate::xtream::XtreamCreds>>;
+
+thread_local! {
+    static CREDS_PROVIDER: RefCell<Option<CredsProvider>> = RefCell::new(None);
 }
 
-fn server() -> Option<&'static Server> {
-    static SERVER: OnceLock<Option<Server>> = OnceLock::new();
-    SERVER
-        .get_or_init(|| {
-            #[derive(Deserialize)]
-            struct UserFile {
-                user_info: UserCreds,
-                server_info: ServerInfo,
-            }
-            #[derive(Deserialize)]
-            struct UserCreds {
-                username: String,
-                password: String,
-            }
-            #[derive(Deserialize)]
-            struct ServerInfo {
-                url: String,
-                /// Port arrives as number or string depending on the panel.
-                port: Value,
-                #[serde(default = "default_protocol")]
-                server_protocol: String,
-            }
-            fn default_protocol() -> String {
-                "http".to_string()
-            }
+/// Install the credentials provider (done once by the window).
+pub fn install_creds_provider(provider: impl Fn() -> Option<crate::xtream::XtreamCreds> + 'static) {
+    CREDS_PROVIDER.with(|slot| *slot.borrow_mut() = Some(Box::new(provider)));
+}
 
-            let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR")))
-                .join("samples")
-                .join("user_info.json");
-            let text = std::fs::read_to_string(path).ok()?;
-            let file: UserFile = serde_json::from_str(&text).ok()?;
-            let port = match &file.server_info.port {
-                Value::Number(n) => n.to_string(),
-                Value::String(s) => s.clone(),
-                _ => return None,
-            };
-            // The credentials and the composed URL stay in memory only.
-            Some(Server {
-                base_url: format!(
-                    "{}://{}:{}/player_api.php?username={}&password={}",
-                    file.server_info.server_protocol,
-                    file.server_info.url,
-                    port,
-                    file.user_info.username,
-                    file.user_info.password
-                ),
-            })
-        })
-        .as_ref()
+/// Compose the player_api.php URL for one action against the active
+/// source. Credentials only ever live inside the returned String, in
+/// memory. `None` when no Xtream source is active (M3U sources have no
+/// details API).
+fn api_url(query: &str) -> Option<String> {
+    let creds = CREDS_PROVIDER.with(|slot| slot.borrow().as_ref().and_then(|f| f()))?;
+    Some(creds.api_url(query, ""))
 }
 
 /// One season as reported by `get_series_info`.
@@ -128,84 +93,48 @@ pub struct VodInfo {
 
 /// Fetch series info (seasons + episodes) asynchronously; `done` runs on
 /// the main loop with `None` on any failure. Results are cached in memory.
-/// Offline samples dumps win when present, otherwise the panel API is used.
+/// Queries the ACTIVE source's panel.
 pub fn series_info(series_id: i64, done: impl FnOnce(Option<SeriesInfo>) + 'static) {
     if let Some(cached) = SERIES_CACHE.with(|c| c.borrow().get(&series_id).cloned()) {
         done(Some(cached));
         return;
     }
-    let mut parsed = local_dump("series_info", series_id)
-        .as_ref()
-        .and_then(parse_series_info);
-    if parsed.is_none() {
-        let url = api_url(&format!("action=get_series_info&series_id={series_id}"));
-        if let Some(url) = url {
-            get_json(&url, move |value| {
-                let result = value.as_ref().and_then(parse_series_info);
-                if let Some(info) = &result {
-                    SERIES_CACHE.with(|c| c.borrow_mut().insert(series_id, info.clone()));
-                }
-                done(result);
-            });
-            return;
-        }
-    }
-    if let Some(info) = parsed.take() {
-        SERIES_CACHE.with(|c| c.borrow_mut().insert(series_id, info.clone()));
-        done(Some(info));
+    let url = api_url(&format!("action=get_series_info&series_id={series_id}"));
+    if let Some(url) = url {
+        get_json(&url, move |value| {
+            let result = value.as_ref().and_then(parse_series_info);
+            if let Some(info) = &result {
+                SERIES_CACHE.with(|c| c.borrow_mut().insert(series_id, info.clone()));
+            }
+            done(result);
+        });
     } else {
+        // No active Xtream source (M3U has no details API).
         done(None);
     }
 }
 
 /// Fetch VOD info (plot/genre/cast/...) asynchronously; `done` runs on the
 /// main loop with `None` on any failure. Results are cached in memory.
-/// Offline samples dumps win when present, otherwise the panel API is used.
+/// Queries the ACTIVE source's panel.
 pub fn vod_info(vod_id: i64, done: impl FnOnce(Option<VodInfo>) + 'static) {
     if let Some(cached) = VOD_CACHE.with(|c| c.borrow().get(&vod_id).cloned()) {
         done(Some(cached));
         return;
     }
-    let mut parsed = local_dump("vod_info", vod_id)
-        .as_ref()
-        .and_then(parse_vod_info);
-    if parsed.is_none() {
-        let url = api_url(&format!("action=get_vod_info&vod_id={vod_id}"));
-        if let Some(url) = url {
-            get_json(&url, move |value| {
-                let result = value.as_ref().and_then(parse_vod_info);
-                if let Some(info) = &result {
-                    VOD_CACHE.with(|c| c.borrow_mut().insert(vod_id, info.clone()));
-                }
-                done(result);
-            });
-            return;
-        }
-    }
-    if let Some(info) = parsed.take() {
-        VOD_CACHE.with(|c| c.borrow_mut().insert(vod_id, info.clone()));
-        done(Some(info));
+    let url = api_url(&format!("action=get_vod_info&vod_id={vod_id}"));
+    if let Some(url) = url {
+        get_json(&url, move |value| {
+            let result = value.as_ref().and_then(parse_vod_info);
+            if let Some(info) = &result {
+                VOD_CACHE.with(|c| c.borrow_mut().insert(vod_id, info.clone()));
+            }
+            done(result);
+        });
     } else {
+        // No active Xtream source (M3U has no details API).
         done(None);
     }
-}
-
-/// Compose the player_api.php URL for one action. Credentials only ever
-/// live inside the returned String, in memory.
-fn api_url(query: &str) -> Option<String> {
-    server().map(|server| format!("{}&{}", server.base_url, query))
-}
-
-/// Offline `samples/<kind>/<kind>_<id>.json` dumps win over the network
-/// when they parse; unparsable dumps (e.g. a stale auth-failure body)
-/// fall through to the network.
-fn local_dump(kind: &str, id: i64) -> Option<Value> {
-    let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR")))
-        .join("samples")
-        .join(kind)
-        .join(format!("{kind}_{id}.json"));
-    let text = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
 }
 
 /// GET a JSON document; `done` receives the parsed value or `None` on any

@@ -82,6 +82,9 @@ pub fn run() {
         }
 
         let window = ui::window::Window::new(app);
+        // Startup loading: sources.json + keyring + per-source sqlite
+        // catalogs BEFORE the first frame ships (cache-first policy).
+        window.load_persisted_state();
         window.present();
     });
 

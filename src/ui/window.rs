@@ -5,8 +5,8 @@ use std::rc::Rc;
 
 use gstreamer::prelude::*;
 
+use crate::catalog::{Catalog, Category, Item, Kind, SeriesMeta};
 use crate::details::{self, Episode, SeriesInfo};
-use crate::sample::{self, Item, Kind, SeriesMeta};
 use crate::ui::sources::SettingsUi;
 
 /// Search results are capped so a one-letter query cannot flood the grid;
@@ -64,10 +64,36 @@ mod imp {
     use gtk::{glib, TemplateChild};
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
-    use std::sync::OnceLock;
+
+    /// Per-source catalog snapshot lookup installed by the settings dialog.
+    pub type SnapshotProviderCell =
+        RefCell<Option<Box<dyn Fn(u64) -> Option<std::rc::Rc<Catalog>>>>>;
+
+    /// Wrapper silencing Debug on the inner value (fields of a
+    /// `#[derive(Debug)]` CompositeTemplate must all be Debug).
+    pub struct DebugExcluded<T>(pub T);
+
+    impl<T> std::ops::Deref for DebugExcluded<T> {
+        type Target = T;
+        fn deref(&self) -> &T {
+            &self.0
+        }
+    }
+
+    impl<T> std::fmt::Debug for DebugExcluded<T> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("<closure>")
+        }
+    }
+
+    impl<T: Default> Default for DebugExcluded<T> {
+        fn default() -> Self {
+            Self(T::default())
+        }
+    }
 
     use super::{CategoryRow, FavKey, HeaderRow};
-    use crate::sample::Catalog;
+    use crate::catalog::Catalog;
     use crate::ui::sources::{SettingsUi, SourcesModel};
 
     #[derive(Debug, Default, gtk::CompositeTemplate)]
@@ -158,8 +184,12 @@ mod imp {
         #[template_child]
         pub episodes_content: TemplateChild<gtk::Box>,
 
-        /// Sample catalog loaded from the gitignored samples/ dumps.
-        pub catalog: OnceLock<Catalog>,
+        /// The catalog snapshot the UI renders from (replaced on ingest).
+        pub catalog: RefCell<Option<std::rc::Rc<Catalog>>>,
+        /// Sidebar rows stay valid only for the snapshot they were built
+        /// from; bumped on every apply_catalog so stale row activations
+        /// no-op instead of indexing into the wrong snapshot.
+        pub catalog_generation: Cell<u64>,
         /// UI state.
         pub playing: Cell<bool>,
         pub muted: Cell<bool>,
@@ -197,6 +227,9 @@ mod imp {
         /// generation may hide the controls (stale timers must no-op, since
         /// `SourceId::remove` panics on already-fired ids).
         pub controls_generation: Cell<u64>,
+        /// Suppresses the dropdown selection handler while startup
+        /// restores the persisted selection (prevents a double apply).
+        pub restoring_selection: Cell<bool>,
         /// Bumped whenever the position ticker must be cancelled/replaced.
         pub position_generation: Cell<u64>,
         /// Guards the seek-scale sync: true while the ticker writes the
@@ -213,6 +246,10 @@ mod imp {
         /// Settings dialog (Sources tab), built lazily and cached for the
         /// window's lifetime so its navigation stack survives re-opens.
         pub sources_dialog: RefCell<Option<Rc<SettingsUi>>>,
+        /// Closure handing out per-source catalog snapshots (installed by
+        /// the settings dialog, which owns the model). Debug-excluded —
+        /// closures are opaque.
+        pub snapshot_provider: DebugExcluded<SnapshotProviderCell>,
     }
 
     #[glib::object_subclass]
@@ -244,7 +281,7 @@ impl Window {
             .property("icon-name", "io.github.tunix.rtv")
             .build();
 
-        let _ = window.imp().catalog.set(sample::Catalog::load());
+        *window.imp().catalog.borrow_mut() = Some(std::rc::Rc::new(Catalog::default()));
         // Alt-tab shows the toplevel title; with a header bar title
         // widget GTK would otherwise fall back to the app id.
         window.set_title(Some("RTV"));
@@ -273,6 +310,61 @@ impl Window {
         glib::subclass::types::ObjectSubclassIsExt::imp(self)
     }
 
+    /// The catalog snapshot the UI currently renders from. Empty (but
+    /// never None) before any source has been ingested.
+    fn catalog(&self) -> std::rc::Rc<Catalog> {
+        self.imp().catalog.borrow().clone().unwrap_or_default()
+    }
+
+    /// Replace the catalog snapshot and rebuild every view derived from
+    /// it (sidebar, favorites, grids, search). PERF: logs the rebuild
+    /// cost so slow re-renders show up in the record.
+    pub fn apply_catalog(&self, catalog: Catalog) {
+        let started = std::time::Instant::now();
+        *self.imp().catalog.borrow_mut() = Some(std::rc::Rc::new(catalog));
+        self.imp()
+            .catalog_generation
+            .set(self.imp().catalog_generation.get() + 1);
+        // Collapse state refers to section positions, which are stable;
+        // keep it. Selection and grids refer to snapshot indices that no
+        // longer exist — reset them instead of risking out-of-bounds.
+        self.imp().selected_category.set(-1);
+        *self.imp().query.borrow_mut() = String::new();
+        self.imp().search_entry.set_text("");
+        while let Some(child) = self.imp().content_grid.first_child() {
+            self.imp().content_grid.remove(&child);
+        }
+        while let Some(child) = self.imp().search_grid.first_child() {
+            self.imp().search_grid.remove(&child);
+        }
+        // Rebuild sidebar rows from scratch (sections and categories may
+        // have changed wholesale with the new source).
+        while let Some(child) = self.imp().content_list.first_child() {
+            self.imp().content_list.remove(&child);
+        }
+        self.imp().headers.borrow_mut().clear();
+        self.imp().categories.borrow_mut().clear();
+        // Favorites survive (they are keyed by kind+id); rebuild their
+        // icons from the new snapshot and drop ones that no longer exist.
+        {
+            let catalog = self.catalog();
+            self.imp()
+                .favorites
+                .borrow_mut()
+                .retain(|f| catalog.item(f.kind, f.id).is_some());
+        }
+        self.imp().favorites_row_index.set(0);
+        self.setup_sidebar();
+        self.rebuild_favorites();
+        self.refresh_rows_visibility();
+        self.imp().content_stack.set_visible_child_name("empty");
+        tracing::info!(
+            target: "rtv::ui",
+            ms = started.elapsed().as_millis(),
+            "catalog applied — sidebar/favorites rebuilt"
+        );
+    }
+
     pub fn toast(&self, msg: &str) {
         self.imp().toast_overlay.add_toast(adw::Toast::new(msg));
     }
@@ -290,6 +382,11 @@ impl Window {
                     self.downgrade(),
                     imp.sources_model.clone(),
                 ));
+                // The dialog owns the sources model; it hands snapshots
+                // to us through this provider so source switching can
+                // re-publish without re-fetching.
+                let model = imp.sources_model.clone();
+                self.install_snapshot_provider(move |id| model.get(id).and_then(|s| s.snapshot));
                 *imp.sources_dialog.borrow_mut() = Some(ui.clone());
                 ui
             }
@@ -298,16 +395,16 @@ impl Window {
     }
 
     /// Rebuilds source-dependent UI (dropdown, browse gating) after the
-    /// sources model changed. Called by the settings dialog.
+    /// sources model changed. Publishes the first READY source's
+    /// snapshot if the browse view is still empty, so adding a source
+    /// unlocks browsing with real data.
     pub fn sync_sources_ui(&self) {
         let imp = self.imp();
         let sources = imp.sources_model.all();
         let has_source = !sources.is_empty();
         imp.has_source.set(has_source);
 
-        // Dropdown: one entry per source (or the placeholder). The browse
-        // catalog stays attached to the samples/ dataset; switching
-        // sources is silent until the backend phase wires real loading.
+        // Dropdown: one entry per source (or the placeholder).
         let items: Vec<&str> = if sources.is_empty() {
             vec!["No sources"]
         } else {
@@ -316,8 +413,8 @@ impl Window {
         // Replacing the DropDown model (or selecting index 0 on a
         // placeholder-only list) can trip an internal
         // g_list_store_remove assertion in GTK; guard both calls so the
-        // model is only swapped when it actually changed and selection is
-        // only moved when there is something to select.
+        // model is only swapped when it actually changed and selection
+        // is only moved when there is something to select.
         let dropdown = imp.dropdown.borrow().clone();
         if let Some(dropdown) = dropdown {
             let changed = dropdown
@@ -343,11 +440,410 @@ impl Window {
         }
     }
 
+    /// Browse the snapshot of the source currently picked in the
+    /// dropdown. Switching sources re-publishes that source's snapshot
+    /// (kept on the source record), falling back to an empty one while
+    /// its ingest is still running.
+    fn show_source_snapshot(&self, source_id: u64) {
+        // The snapshot currently lives in the settings model; fetch it
+        // via the closure the settings dialog installed (see
+        // install_snapshot_provider).
+        let snapshot = self
+            .imp()
+            .snapshot_provider
+            .0
+            .borrow()
+            .as_ref()
+            .and_then(|f| f(source_id));
+        match snapshot {
+            Some(catalog) => {
+                tracing::info!(target: "rtv::ui", id = source_id, "source switch: applying snapshot");
+                self.apply_catalog((*catalog).clone());
+            }
+            None => {
+                tracing::info!(target: "rtv::ui", id = source_id, "source switch: no snapshot yet (still indexing?)");
+                self.apply_catalog(Catalog::default());
+            }
+        }
+    }
+
+    /// Called by the settings dialog after any change: re-syncs the
+    /// dropdown and, when the browse view has no snapshot yet, publishes
+    /// the first ready source's catalog.
+    pub fn on_sources_changed(&self) {
+        self.sync_sources_ui();
+        let sources = self.imp().sources_model.all();
+        if let Some(source) = sources
+            .iter()
+            .find(|s| s.state == crate::ui::sources::SourceState::Ready)
+        {
+            // Only auto-apply when the current snapshot is still empty;
+            // skipped while startup restore is driving the selection
+            // (the restore path applies explicitly).
+            if self.catalog().is_empty() && !self.imp().restoring_selection.get() {
+                self.show_source_snapshot(source.id);
+            }
+        }
+    }
+
+    /// Install the closure the settings dialog uses to hand us catalog
+    /// snapshots per source id (the model lives there; the window only
+    /// renders from it).
+    pub fn install_snapshot_provider(
+        &self,
+        provider: impl Fn(u64) -> Option<std::rc::Rc<Catalog>> + 'static,
+    ) {
+        self.imp()
+            .snapshot_provider
+            .0
+            .borrow_mut()
+            .replace(Box::new(provider));
+    }
+
+    /// Visibility toggle from the settings dialog: patches the snapshot
+    /// and re-renders. THE FIX for "removing a category in settings did
+    /// not remove it from the UI": the snapshot is the single source of
+    /// truth the browse view renders from, so patching it immediately
+    /// hides the category everywhere (sidebar rows, grids, search).
+    pub fn set_category_visible(&self, kind: Kind, category_id: &str, visible: bool) {
+        let started = std::time::Instant::now();
+        let catalog = (*self.catalog()).clone();
+        let active = self.active_source_id();
+        let mut changed = false;
+        let mut affected_names: Vec<String> = Vec::new();
+        let mut catalog = catalog;
+        for cat in &mut catalog.categories {
+            if cat.kind == kind && cat.id == category_id {
+                cat.visible = visible;
+                changed = true;
+                affected_names.push(cat.name.clone());
+            }
+        }
+        if !changed {
+            tracing::warn!(target: "rtv::ui", category = category_id, "visibility toggle matched no category");
+            return;
+        }
+        tracing::info!(
+            target: "rtv::ui",
+            category = %affected_names.join(","),
+            visible,
+            "category visibility patched into snapshot"
+        );
+        self.apply_catalog(catalog.clone());
+        if active > 0 {
+            crate::store::persist_category_flags(active, &catalog);
+        }
+        tracing::info!(
+            target: "rtv::ui",
+            ms = started.elapsed().as_millis(),
+            "visibility toggle re-render finished"
+        );
+    }
+
+    /// Bulk All/None for one whole section (the settings dialog's
+    /// bulk-selection feature).
+    pub fn set_section_visible(&self, kind: Kind, visible: bool) {
+        let catalog = (*self.catalog()).clone();
+        let mut catalog = catalog;
+        let mut n = 0usize;
+        for cat in &mut catalog.categories {
+            if cat.kind == kind {
+                cat.visible = visible;
+                n += 1;
+            }
+        }
+        tracing::info!(target: "rtv::ui", kind = ?kind, visible, count = n, "bulk section visibility");
+        self.apply_catalog(catalog);
+    }
+
+    /// Read-only handle to the current snapshot (the settings dialog's
+    /// detail page enumerates categories from it).
+    pub fn catalog_rc(&self) -> std::rc::Rc<Catalog> {
+        self.catalog()
+    }
+
+    /// Background re-ingest of one source (startup refresh path).
+    /// Mirrors the settings dialog's start_ingest pipeline without
+    /// needing the dialog: model update -> ingest::start -> publish.
+    fn background_ingest(&self, id: u64) {
+        let imp = self.imp();
+        let Some(source) = imp.sources_model.get(id) else {
+            return;
+        };
+        tracing::info!(target: "rtv::ingest", id, name = %source.name, "background ingest kicked off");
+        imp.sources_model.update(id, |s| {
+            s.state = crate::ui::sources::SourceState::Indexing;
+            s.failure = None;
+        });
+        self.sync_sources_ui();
+
+        let kind = source.kind.clone();
+        let win_weak = self.downgrade();
+        let model = imp.sources_model.clone();
+        let model2 = imp.sources_model.clone();
+        crate::ingest::start(
+            &kind,
+            move |progress| {
+                model2.update(id, |s| {
+                    s.live_cats = progress.live_cats as u32;
+                    s.live_items = progress.live_items as u32;
+                    s.vod_cats = progress.vod_cats as u32;
+                    s.vod_items = progress.vod_items as u32;
+                    s.series_cats = progress.series_cats as u32;
+                    s.series_items = progress.series_items as u32;
+                });
+            },
+            move |outcome| match outcome {
+                crate::ingest::IngestOutcome::Done(catalog) => {
+                    crate::store::save_catalog(id, &catalog);
+                    let counts = (
+                        catalog.item_count(Kind::Live) as u32,
+                        catalog.item_count(Kind::Vod) as u32,
+                        catalog.item_count(Kind::Series) as u32,
+                    );
+                    let snapshot = std::rc::Rc::new(catalog);
+                    model.update(id, |s| {
+                        s.state = crate::ui::sources::SourceState::Ready;
+                        s.failure = None;
+                        s.snapshot = Some(snapshot.clone());
+                        s.live_cats = snapshot
+                            .categories
+                            .iter()
+                            .filter(|c| c.kind == Kind::Live)
+                            .count() as u32;
+                        s.live_items = counts.0;
+                        s.vod_cats = snapshot
+                            .categories
+                            .iter()
+                            .filter(|c| c.kind == Kind::Vod)
+                            .count() as u32;
+                        s.vod_items = counts.1;
+                        s.series_cats = snapshot
+                            .categories
+                            .iter()
+                            .filter(|c| c.kind == Kind::Series)
+                            .count() as u32;
+                        s.series_items = counts.2;
+                    });
+                    if let Some(win) = win_weak.upgrade() {
+                        let active = win.active_source_id();
+                        if active == id {
+                            // The re-ingested source is the active one:
+                            // publish and, if browsing is still locked
+                            // (welcome screen), unlock it now.
+                            win.apply_catalog((*snapshot).clone());
+                            if !win.browse_unlocked() {
+                                win.unlock_browse();
+                            }
+                        } else if active == 0 {
+                            win.apply_catalog((*snapshot).clone());
+                            win.unlock_browse();
+                        }
+                        win.sync_sources_ui();
+                        win.toast("Source ready — catalog updated");
+                    }
+                    tracing::info!(target: "rtv::ingest", id, "background ingest DONE");
+                }
+                crate::ingest::IngestOutcome::Failed(message) => {
+                    model.update(id, |s| {
+                        s.state = crate::ui::sources::SourceState::Failed;
+                        s.failure = Some(message.clone());
+                        s.snapshot = None;
+                    });
+                    if let Some(win) = win_weak.upgrade() {
+                        win.toast(&format!("Background load failed: {message}"));
+                    }
+                    tracing::error!(target: "rtv::ingest", id, reason = %message, "background ingest FAILED");
+                }
+            },
+        );
+    }
+
+    /// Whether the browse page is already on the navigation stack.
+    pub fn browse_unlocked(&self) -> bool {
+        self.imp()
+            .main_view
+            .visible_page()
+            .map(|page| page == *self.imp().browse_page)
+            .unwrap_or(false)
+    }
+
+    /// Push the browse page (unlock browsing) if still on welcome.
+    pub fn unlock_browse(&self) {
+        let imp = self.imp();
+        imp.has_source.set(true);
+        if let Some(visible) = imp.main_view.visible_page() {
+            if visible == *imp.welcome_page {
+                imp.main_view.push(&*imp.browse_page);
+            }
+        }
+    }
+
+    /// Id of the source currently picked in the dropdown (0 = none).
+    pub fn active_source_id(&self) -> u64 {
+        let imp = self.imp();
+        let index = imp
+            .dropdown
+            .borrow()
+            .as_ref()
+            .map(|d| d.selected())
+            .unwrap_or(0);
+        imp.sources_model
+            .all()
+            .get(index as usize)
+            .map(|s| s.id)
+            .unwrap_or(0)
+    }
+
+    /// STARTUP LOADING (the loading policy from AGENTS.md): render from
+    /// the local cache first. Sources come from sources.json + keyring;
+    /// every stored catalog snapshot is published immediately. The
+    /// last-active source is restored into the dropdown. Sources with
+    /// no stored catalog surface the Retry affordance instead of
+    /// silently refetching with possibly-stale credentials.
+    pub fn load_persisted_state(&self) {
+        let (sources, next_id) = crate::store::load_sources();
+        let imp = self.imp();
+        // Whole-loader suppression: any dropdown/sync triggered apply
+        // during restore would duplicate the explicit one below.
+        imp.restoring_selection.set(true);
+        // The snapshot provider is normally installed by the settings
+        // dialog on first open — but the startup loader needs it EARLIER
+        // (show_source_snapshot during restore). Install it here too;
+        // install_snapshot_provider replaces this when the dialog opens.
+        let model = imp.sources_model.clone();
+        self.install_snapshot_provider(move |id| model.get(id).and_then(|s| s.snapshot));
+        // Detail fetches (series/vod info) ride the ACTIVE source's
+        // credentials; M3U sources have no details API -> None.
+        let model2 = imp.sources_model.clone();
+        let dropdown2 = imp.dropdown.clone();
+        crate::details::install_creds_provider(move || {
+            let index = dropdown2
+                .borrow()
+                .as_ref()
+                .map(|d| d.selected())
+                .unwrap_or(0);
+            model2
+                .all()
+                .get(index as usize)
+                .and_then(|source| match &source.kind {
+                    crate::ui::sources::SourceKind::Xtream {
+                        server,
+                        username,
+                        password,
+                    } => {
+                        let base = crate::ingest::parse_server(server)?;
+                        Some(crate::xtream::XtreamCreds {
+                            base_url: base,
+                            username: username.clone(),
+                            password: password.clone(),
+                        })
+                    }
+                    crate::ui::sources::SourceKind::M3U { .. } => None,
+                })
+        });
+        for source in &sources {
+            imp.sources_model.reserve_ids_through(source.id);
+        }
+        for source in sources {
+            let id = source.id;
+            let mut source = source;
+            if let Some(catalog) = crate::store::load_catalog(id) {
+                source.state = crate::ui::sources::SourceState::Ready;
+                source.live_cats = catalog
+                    .categories
+                    .iter()
+                    .filter(|c| c.kind == Kind::Live)
+                    .count() as u32;
+                source.live_items = catalog.item_count(Kind::Live) as u32;
+                source.vod_cats = catalog
+                    .categories
+                    .iter()
+                    .filter(|c| c.kind == Kind::Vod)
+                    .count() as u32;
+                source.vod_items = catalog.item_count(Kind::Vod) as u32;
+                source.series_cats = catalog
+                    .categories
+                    .iter()
+                    .filter(|c| c.kind == Kind::Series)
+                    .count() as u32;
+                source.series_items = catalog.item_count(Kind::Series) as u32;
+                source.snapshot = Some(std::rc::Rc::new(catalog));
+            } else {
+                source.state = crate::ui::sources::SourceState::Failed;
+                source.failure = Some("Not loaded yet — press Retry to fetch the catalog.".into());
+            }
+            // The model is empty at startup - append, don't replace
+            // (replace() only updates existing entries; a no-op here
+            // silently dropped every loaded source and left the model
+            // empty, which read back as restored_active=false).
+            imp.sources_model.add(|_| source);
+        }
+        imp.sources_model
+            .reserve_ids_through(next_id.saturating_sub(1));
+        self.sync_sources_ui();
+        self.on_sources_changed();
+
+        // Restore the last active source into the dropdown + snapshot.
+        let last = crate::store::last_source();
+        let mut restored_active = false;
+        if last > 0 {
+            let sources = imp.sources_model.all();
+            if let Some(index) = sources.iter().position(|s| s.id == last) {
+                // The dropdown notify handler applies the snapshot only
+                // when the selection CHANGES; on startup it may equal the
+                // restored index (no change, no notify) or fire alongside
+                // the explicit call below (double apply). The restoring
+                // flag collapses both paths to exactly one apply.
+                if let Some(dropdown) = imp.dropdown.borrow().as_ref() {
+                    dropdown.set_selected(index as u32);
+                }
+                self.show_source_snapshot(last);
+                restored_active = true;
+            }
+        }
+        imp.restoring_selection.set(false);
+        // Cache-first launch: with a usable catalog on board, browsing
+        // unlocks immediately instead of parking on the welcome screen.
+        if restored_active && !self.catalog().is_empty() {
+            imp.has_source.set(true);
+            imp.main_view.push(&*imp.browse_page);
+        }
+        // Background refresh (loading policy: never block, always
+        // surface progress): sources WITHOUT a stored catalog re-ingest
+        // now, in the background. Their rows flip to live counters; a
+        // finished ingest publishes its snapshot and heals the source.
+        let win_weak = self.downgrade();
+        let model = imp.sources_model.clone();
+        glib::idle_add_local_once(move || {
+            let Some(win) = win_weak.upgrade() else {
+                return;
+            };
+            for source in model.all() {
+                if crate::store::load_catalog(source.id).is_none() {
+                    tracing::info!(
+                        target: "rtv::store",
+                        id = source.id,
+                        "no stored catalog — background re-ingest"
+                    );
+                    win.background_ingest(source.id);
+                }
+            }
+        });
+        tracing::info!(
+            target: "rtv::store",
+            last_source = last,
+            unlocked_browse = restored_active && !self.catalog().is_empty(),
+            "persisted state loaded"
+        );
+    }
+
     /// Called when the settings dialog closes: if the user has at least one
     /// source and is still on the welcome screen, unlock browsing. Without
     /// a source the welcome screen stays (Add Source again).
     pub fn on_sources_closed(&self) {
         let imp = self.imp();
+        self.on_sources_changed();
         if !imp.has_source.get() {
             return;
         }
@@ -473,14 +969,28 @@ impl Window {
         let settings = gio::Settings::new("io.github.tunix.rtv");
         imp.volume_scale.set_value(settings.double("volume"));
 
-        // Source picker, valhalla-style, in the header title area. Switching
-        // is silent for now; real per-source loading arrives with the
-        // source/back-end work.
-        let model = gtk::StringList::new(&["Xtream — Home Panel", "M3U — Trial List"]);
-        let dropdown = gtk::DropDown::new(Some(model), None::<gtk::Expression>);
-        dropdown.set_selected(0);
+        // Source picker, valhalla-style, in the header title area. The
+        // model is populated by sync_sources_ui() from the sources model;
+        // switching sources re-applies that source's catalog snapshot.
+        let dropdown = gtk::DropDown::new(
+            Some(gtk::StringList::new(&["No sources"])),
+            None::<gtk::Expression>,
+        );
         imp.dropdown_box.append(&dropdown);
-        imp.dropdown.replace(Some(dropdown));
+        imp.dropdown.replace(Some(dropdown.clone()));
+        let win = self.downgrade();
+        dropdown.connect_selected_notify(move |dropdown| {
+            let Some(win) = win.upgrade() else { return };
+            if win.imp().restoring_selection.get() {
+                return; // startup restore applies the snapshot itself
+            }
+            let index = dropdown.selected();
+            let sources = win.imp().sources_model.all();
+            let Some(source) = sources.get(index as usize) else { return };
+            tracing::info!(target: "rtv::ui", id = source.id, name = %source.name, "source selected in dropdown");
+            crate::store::set_last_source(source.id);
+            win.show_source_snapshot(source.id);
+        });
 
         // Pinned Favorites row at the very top of the sidebar: always
         // visible, unaffected by section collapse and search filtering.
@@ -755,17 +1265,18 @@ impl Window {
     /// active search query.
     fn setup_sidebar(&self) {
         let imp = self.imp();
-        let Some(catalog) = imp.catalog.get() else {
-            return;
-        };
+        let catalog = self.catalog();
 
         for (group, kind) in Kind::SIDEBAR.iter().enumerate() {
             let group = group as i32;
-            let cats: Vec<(usize, &sample::Category)> = catalog
+            // HIDDEN categories do not render in the sidebar at all — the
+            // settings toggles control visibility end to end (the fix for
+            // "removing a category in settings left it in the UI").
+            let cats: Vec<(usize, &Category)> = catalog
                 .categories
                 .iter()
                 .enumerate()
-                .filter(|(_, c)| c.kind == *kind)
+                .filter(|(_, c)| c.kind == *kind && c.visible)
                 .collect();
 
             let header_label = gtk::Label::builder()
@@ -873,12 +1384,23 @@ impl Window {
         while let Some(child) = imp.search_grid.first_child() {
             imp.search_grid.remove(&child);
         }
-        let catalog = imp.catalog.get().expect("catalog");
+        let catalog = self.catalog();
         // Search filters the CURRENT category's content when one is
         // selected; with no category it spans the whole catalog (cards
-        // then carry their category label).
+        // then carry their category label). HIDDEN categories are
+        // excluded from search everywhere — that is the whole point of
+        // the visibility toggle.
         let selected = imp.selected_category.get();
+        let hidden: std::collections::HashSet<(Kind, &str)> = catalog
+            .categories
+            .iter()
+            .filter(|c| !c.visible)
+            .map(|c| (c.kind, c.id.as_str()))
+            .collect();
         let scope = |it: &Item| {
+            if hidden.contains(&(it.kind, it.category_id.as_str())) {
+                return false;
+            }
             if selected >= 0 {
                 match catalog.categories.get(selected as usize) {
                     Some(cat) => it.kind == cat.kind && it.category_id == cat.id,
@@ -909,7 +1431,8 @@ impl Window {
         let imp = self.imp();
         let q = imp.query.borrow().trim().to_lowercase();
 
-        if let Some(catalog) = imp.catalog.get() {
+        {
+            let catalog = self.catalog();
             // Matching item count per (kind, category id) in one pass.
             let mut counts: std::collections::HashMap<(Kind, &str), usize> =
                 std::collections::HashMap::new();
@@ -935,11 +1458,13 @@ impl Window {
             // Headers normally show the sub-category count; while
             // searching, the count of sub-categories that have matches.
             for h in imp.headers.borrow().iter() {
+                // Hidden categories never render as rows; exclude them from
+                // the header count in every state.
                 let count = if q.is_empty() {
                     catalog
                         .categories
                         .iter()
-                        .filter(|c| c.kind == h.kind)
+                        .filter(|c| c.kind == h.kind && c.visible)
                         .count()
                 } else {
                     catalog
@@ -947,6 +1472,7 @@ impl Window {
                         .iter()
                         .filter(|c| {
                             c.kind == h.kind
+                                && c.visible
                                 && counts.get(&(c.kind, c.id.as_str())).copied().unwrap_or(0) > 0
                         })
                         .count()
@@ -986,10 +1512,18 @@ impl Window {
         while let Some(child) = imp.content_grid.first_child() {
             imp.content_grid.remove(&child);
         }
-        let catalog = imp.catalog.get().expect("catalog");
+        let catalog = self.catalog();
         let Some(cat) = catalog.categories.get(category_index) else {
             return;
         };
+        if !cat.visible {
+            // Stale activation against a snapshot where the category was
+            // since hidden — show the empty state instead of leaking the
+            // hidden category's content.
+            tracing::info!(target: "rtv::ui", category = %cat.name, "hidden category activation ignored");
+            imp.content_stack.set_visible_child_name("empty");
+            return;
+        }
         let q = imp.query.borrow().trim().to_lowercase();
         let indices: Vec<usize> = catalog
             .items
@@ -1030,22 +1564,26 @@ impl Window {
                 let Some(idx) = rem.pop() else {
                     return glib::ControlFlow::Break;
                 };
-                let Some(item) = i.catalog.get().and_then(|c| c.items.get(idx)) else {
-                    continue;
+                let (item, category_label) = {
+                    let catalog_ref = i.catalog.borrow();
+                    let Some(catalog) = catalog_ref.as_ref() else {
+                        continue;
+                    };
+                    let Some(item) = catalog.items.get(idx).cloned() else {
+                        continue;
+                    };
+                    let category_label = with_categories
+                        .then(|| {
+                            catalog
+                                .categories
+                                .iter()
+                                .find(|cat| cat.kind == item.kind && cat.id == item.category_id)
+                                .map(|cat| cat.name.clone())
+                        })
+                        .flatten();
+                    (item, category_label)
                 };
-                let category_label = with_categories
-                    .then(|| {
-                        i.catalog
-                            .get()
-                            .and_then(|c| {
-                                c.categories
-                                    .iter()
-                                    .find(|cat| cat.kind == item.kind && cat.id == item.category_id)
-                            })
-                            .map(|cat| cat.name.clone())
-                    })
-                    .flatten();
-                flowbox.append(&content_card(item, category_label.as_deref()));
+                flowbox.append(&content_card(&item, category_label.as_deref()));
             }
             if rem.is_empty() {
                 glib::ControlFlow::Break
@@ -1156,7 +1694,8 @@ impl Window {
                 // display, so a stale favorite still routes correctly.
                 let icon = imp
                     .catalog
-                    .get()
+                    .borrow()
+                    .as_ref()
                     .and_then(|c| {
                         c.items
                             .iter()
@@ -1178,13 +1717,9 @@ impl Window {
     /// Card activation routes by the content kind the card carries:
     /// Live -> playback, Series/Movies -> the detail page.
     fn route_card(&self, child: &gtk::FlowBoxChild) {
-        let imp = self.imp();
+        let catalog = self.catalog();
         if let (Some(kind), Some(id)) = (card_kind(child), card_id(child)) {
-            if let Some(item) = imp
-                .catalog
-                .get()
-                .and_then(|c| c.items.iter().find(|it| it.kind == kind && it.id == id))
-            {
+            if let Some(item) = catalog.item(kind, id) {
                 match kind {
                     Kind::Live => self.play(kind, id, &item.name),
                     Kind::Series | Kind::Vod => self.open_details(kind, id, &item.name),
@@ -1194,11 +1729,7 @@ impl Window {
         }
         // Fallback: cards without kind data resolve by their title.
         if let Some(name) = card_name(child) {
-            if let Some(item) = imp
-                .catalog
-                .get()
-                .and_then(|c| c.items.iter().find(|it| it.name == name))
-            {
+            if let Some(item) = catalog.items.iter().find(|it| it.name == name) {
                 match item.kind {
                     Kind::Live => self.play(item.kind, item.id, &item.name),
                     Kind::Series | Kind::Vod => self.open_details(item.kind, item.id, &item.name),
@@ -1208,12 +1739,60 @@ impl Window {
     }
 
     fn play(&self, kind: Kind, id: i64, name: &str) {
-        let status = match kind {
-            Kind::Live => "Live · 1080p",
-            Kind::Vod => "Movie · 1080p",
-            Kind::Series => "Series",
+        // Real playback. M3U entries carry their OWN url (per-entry);
+        // Xtream items get one composed from the active source's
+        // credentials (never logged). With neither, the demo player
+        // stands in.
+        let catalog = self.catalog();
+        let item_url = catalog.item(kind, id).and_then(|it| it.url.clone());
+        let url = item_url.or_else(|| {
+            self.active_source_creds()
+                .map(|creds| creds.stream_url(kind, id, "ts"))
+        });
+        let status = match (&url, kind) {
+            (Some(_), Kind::Live) => "Live · playing from source",
+            (Some(_), Kind::Vod) => "Movie · playing from source",
+            (Some(_), Kind::Series) => "Series",
+            (None, Kind::Live) => "Live · 1080p",
+            (None, Kind::Vod) => "Movie · 1080p",
+            (None, Kind::Series) => "Series",
         };
         self.play_with_status(kind, id, name, name, status);
+        if let Some(url) = url {
+            tracing::info!(target: "rtv::play", kind = ?kind, id, "playback URL composed (credentials not logged)");
+            if self.start_playback(&url) {
+                self.imp().playing.set(true);
+                self.set_play_icon(true);
+            } else {
+                tracing::warn!(target: "rtv::play", "GStreamer pipeline failed to start — demo player shown");
+                self.toast("Real playback is unavailable here — the demo player shows instead");
+            }
+        }
+    }
+
+    /// Credentials of the source picked in the dropdown (for playback
+    /// URL composition). M3U sources return None — their entries carry
+    /// their own URLs in the playlist (wired in a later round).
+    fn active_source_creds(&self) -> Option<crate::xtream::XtreamCreds> {
+        let imp = self.imp();
+        let index = imp.dropdown.borrow().as_ref()?.selected();
+        let sources = imp.sources_model.all();
+        let source = sources.get(index as usize)?;
+        match &source.kind {
+            crate::ui::sources::SourceKind::Xtream {
+                server,
+                username,
+                password,
+            } => {
+                let base = crate::ingest::parse_server(server)?;
+                Some(crate::xtream::XtreamCreds {
+                    base_url: base,
+                    username: username.clone(),
+                    password: password.clone(),
+                })
+            }
+            crate::ui::sources::SourceKind::M3U { .. } => None,
+        }
     }
 
     /// Playing an episode keeps the HEART on the parent series: the
@@ -1555,11 +2134,8 @@ impl Window {
     /// fetches that outlive the page they were started for.
     fn open_details(&self, kind: Kind, id: i64, name: &str) {
         let imp = self.imp();
-        let Some(item) = imp
-            .catalog
-            .get()
-            .and_then(|c| c.items.iter().find(|it| it.kind == kind && it.id == id))
-        else {
+        let catalog = self.catalog();
+        let Some(item) = catalog.item(kind, id) else {
             return;
         };
         imp.details_generation.set(imp.details_generation.get() + 1);
@@ -1594,10 +2170,11 @@ impl Window {
     /// filled in by the async get_series_info fetch.
     fn open_series_details(&self, id: i64, name: &str, cover: Option<&str>, generation: u64) {
         let imp = self.imp();
-        let meta = imp
-            .catalog
-            .get()
-            .and_then(|c| c.series_meta.get(&id).cloned())
+        let meta = self
+            .catalog()
+            .series_meta
+            .get(&id)
+            .cloned()
             .unwrap_or_default();
 
         let ctx = SeriesCtx {
