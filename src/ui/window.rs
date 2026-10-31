@@ -7,6 +7,7 @@ use gstreamer::prelude::*;
 
 use crate::details::{self, Episode, SeriesInfo};
 use crate::sample::{self, Item, Kind, SeriesMeta};
+use crate::ui::sources::SettingsUi;
 
 /// Search results are capped so a one-letter query cannot flood the grid;
 /// the backend phase will replace this with real incremental search.
@@ -62,11 +63,12 @@ mod imp {
     use adw::subclass::prelude::*;
     use gtk::{glib, TemplateChild};
     use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
     use std::sync::OnceLock;
 
-    use crate::sample::Catalog;
-
     use super::{CategoryRow, FavKey, HeaderRow};
+    use crate::sample::Catalog;
+    use crate::ui::sources::{SettingsUi, SourcesModel};
 
     #[derive(Debug, Default, gtk::CompositeTemplate)]
     #[template(resource = "/io/github/tunix/rtv/window.ui")]
@@ -209,6 +211,11 @@ mod imp {
         /// Bumped on every open_details; stale async detail fillers no-op
         /// instead of touching a page that already shows other content.
         pub details_generation: Cell<u64>,
+        /// Configured sources (mock phase). Shared with the settings dialog.
+        pub sources_model: Rc<SourcesModel>,
+        /// Settings dialog (Sources tab), built lazily and cached for the
+        /// window's lifetime so its navigation stack survives re-opens.
+        pub sources_dialog: RefCell<Option<Rc<SettingsUi>>>,
     }
 
     #[glib::object_subclass]
@@ -277,33 +284,76 @@ impl Window {
         self.imp().toast_overlay.add_toast(adw::Toast::new(msg));
     }
 
+    /// Opens the settings dialog (Sources tab), building it lazily. The
+    /// dialog is cached on the window so its navigation stack survives
+    /// re-opens; the dialog is dropped with the window.
+    fn open_sources_dialog(&self) {
+        let imp = self.imp();
+        let cached = imp.sources_dialog.borrow().as_ref().map(|ui| ui.clone());
+        let dialog = match cached {
+            Some(ui) => ui,
+            None => {
+                let ui = Rc::new(SettingsUi::build(
+                    self.downgrade(),
+                    imp.sources_model.clone(),
+                ));
+                *imp.sources_dialog.borrow_mut() = Some(ui.clone());
+                ui
+            }
+        };
+        dialog.present(self);
+    }
+
+    /// Rebuilds source-dependent UI (dropdown, browse gating) after the
+    /// sources model changed. Called by the settings dialog.
+    pub fn sync_sources_ui(&self) {
+        let imp = self.imp();
+        let sources = imp.sources_model.all();
+        let has_source = !sources.is_empty();
+        imp.has_source.set(has_source);
+
+        // Dropdown: one entry per source (or the placeholder). The mock
+        // browse catalog stays attached to the mock dataset; switching
+        // sources is silent until the backend phase wires real loading.
+        let items: Vec<&str> = if sources.is_empty() {
+            vec!["No sources"]
+        } else {
+            sources.iter().map(|s| s.name.as_str()).collect()
+        };
+        let model = gtk::StringList::new(&items);
+        let dropdown = imp.dropdown.borrow().clone();
+        if let Some(dropdown) = dropdown {
+            dropdown.set_model(Some(&model));
+            dropdown.set_selected(0);
+            dropdown.set_sensitive(has_source);
+        }
+    }
+
+    /// Called when the settings dialog closes: if the user has at least one
+    /// source and is still on the welcome screen, unlock browsing. Without
+    /// a source the welcome screen stays (Add Source again).
+    pub fn on_sources_closed(&self) {
+        let imp = self.imp();
+        if !imp.has_source.get() {
+            return;
+        }
+        let Some(visible) = imp.main_view.visible_page() else {
+            return;
+        };
+        if visible == *imp.welcome_page {
+            imp.main_view.push(&*imp.browse_page);
+        }
+    }
+
     fn setup_actions(&self) {
-        // First run: adding a source unlocks browsing. In --mock mode the
-        // mock catalog is attached at once; in real mode the source-setup
-        // dialog (backend work) has not landed yet, so the user stays on
-        // the welcome screen with an explanatory toast.
+        // Sources are managed in the settings dialog (Sources tab): add,
+        // edit, delete. The mock phase keeps the dialog in-memory; the
+        // backend phase will replace the mock data with real fetching.
         let win = self.downgrade();
         let add_source = gio::SimpleAction::new("add-source", None);
         add_source.connect_activate(move |_, _| {
             let Some(win) = win.upgrade() else { return };
-            let imp = win.imp();
-            if imp.has_source.get() {
-                win.toast("Source dialog comes later — the mock already has 2 sources");
-                return;
-            }
-            if crate::mock::enabled() {
-                imp.has_source.set(true);
-                imp.main_view.push(&*imp.browse_page);
-                win.toast("Mock source added — the real setup dialog comes later");
-            } else if crate::mock::AVAILABLE {
-                // Dev builds can point users at the mock mode. Release builds
-                // fold this branch away: there, the flag does not exist.
-                win.toast(
-                    "Real source setup is not implemented yet — run `rtv --mock` to explore the UI with sample data",
-                );
-            } else {
-                win.toast("Real source setup is not implemented yet");
-            }
+            win.open_sources_dialog();
         });
         self.add_action(&add_source);
 
@@ -323,11 +373,15 @@ impl Window {
             reset.connect_activate(move |_, _| {
                 let Some(win) = win.upgrade() else { return };
                 let imp = win.imp();
-                imp.has_source.set(false);
+                imp.sources_model.clear();
+                if let Some(dialog) = imp.sources_dialog.borrow().as_ref() {
+                    dialog.refresh();
+                }
                 imp.favorites.borrow_mut().clear();
                 *imp.current.borrow_mut() = None;
                 win.stop_pipeline();
                 win.rebuild_favorites();
+                win.sync_sources_ui();
                 imp.main_view.pop_to_page(&*imp.welcome_page);
             });
             self.add_action(&reset);
@@ -400,6 +454,14 @@ impl Window {
             }
         });
         self.add_action(&exit_fullscreen);
+
+        let win = self.downgrade();
+        let settings = gio::SimpleAction::new("settings", None);
+        settings.connect_activate(move |_, _| {
+            let Some(win) = win.upgrade() else { return };
+            win.open_sources_dialog();
+        });
+        self.add_action(&settings);
 
         let win2 = self.downgrade();
         let about = gio::SimpleAction::new("about", None);
@@ -2870,6 +2932,7 @@ mod tests {
     #[test]
     fn injects_the_reset_item_into_the_first_section() {
         let first = gio::Menu::new();
+        first.append(Some("_Settings…"), Some("win.settings"));
         first.append(Some("_Add source…"), Some("win.add-source"));
         let second = gio::Menu::new();
         second.append(Some("_About RTV"), Some("win.about"));
@@ -2881,19 +2944,25 @@ mod tests {
         let rebuilt = inject_mock_reset(source.upcast_ref());
         assert_eq!(
             flat_actions(rebuilt.upcast_ref()),
-            ["win.add-source", "win.reset-mock", "win.about", "app.quit"]
+            [
+                "win.settings",
+                "win.add-source",
+                "win.reset-mock",
+                "win.about",
+                "app.quit"
+            ]
         );
     }
 
     #[test]
     fn injects_at_the_top_level_when_there_are_no_sections() {
         let source = gio::Menu::new();
-        source.append(Some("_Add source…"), Some("win.add-source"));
+        source.append(Some("_Settings…"), Some("win.settings"));
 
         let rebuilt = inject_mock_reset(source.upcast_ref());
         assert_eq!(
             flat_actions(rebuilt.upcast_ref()),
-            ["win.add-source", "win.reset-mock"]
+            ["win.settings", "win.reset-mock"]
         );
     }
 }
