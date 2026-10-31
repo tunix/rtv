@@ -449,9 +449,15 @@ impl Ctx {
     }
 
     fn build_row(&self, source: &Source) -> gtk::ListBoxRow {
+        // Source names and the stats subtitle come straight from user
+        // input and panel data, which can carry a bare "&" — Adwaita
+        // parses row titles/subtitles as Pango markup, and an unparsed
+        // "&" logs a GTK warning and drops the rest of the text. Plain
+        // text wins here.
         let row = adw::ActionRow::builder()
             .title(&source.name)
             .subtitle(source_subtitle(source))
+            .use_markup(false)
             .build();
         row.add_prefix(&gtk::Image::from_icon_name(source.kind.icon()));
 
@@ -911,8 +917,12 @@ impl Ctx {
                     .description("Hidden categories stay in the source but are skipped when rendering content grids.")
                     .build();
                 for cat in cats {
+                    // Panel category names can carry a bare "&"; row
+                    // titles parse as Pango markup unless use_markup is
+                    // off (same fix as the source list rows).
                     let switch_row = adw::SwitchRow::builder()
                         .title(&cat.name)
+                        .use_markup(false)
                         .active(cat.visible)
                         .build();
                     let ctx = self.clone();
