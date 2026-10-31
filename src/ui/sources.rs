@@ -722,22 +722,13 @@ impl Ctx {
         kind_toggle.connect_active_name_notify(move |_| update_on_toggle());
         update_save();
 
-        let back = gtk::Button::builder()
-            .icon_name("go-previous-symbolic")
-            .build();
-        let nav_weak = nav.downgrade();
-        back.connect_clicked(move |_| {
-            if let Some(nav) = nav_weak.upgrade() {
-                nav.pop();
-            }
-        });
-
+        // No manual back button here: adw::NavigationView automatically adds
+        // one to the page's header bar.
         let header = adw::HeaderBar::new();
         header.set_title_widget(Some(&adw::WindowTitle::new(
             if adding { "Add source" } else { "Edit source" },
             "",
         )));
-        header.pack_start(&back);
         header.pack_end(&save);
 
         let scroll = gtk::ScrolledWindow::builder()
@@ -840,16 +831,7 @@ impl Ctx {
             &source.name,
             source.kind.label(),
         )));
-        let nav_weak = nav.downgrade();
-        let back = gtk::Button::builder()
-            .icon_name("go-previous-symbolic")
-            .build();
-        back.connect_clicked(move |_| {
-            if let Some(nav) = nav_weak.upgrade() {
-                nav.pop();
-            }
-        });
-        header.pack_start(&back);
+        // No manual back button: NavigationView provides one automatically.
 
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&header);
@@ -1048,7 +1030,7 @@ impl SettingsUi {
         sidebar_list.add_css_class("navigation-sidebar");
         let sources_tab = gtk::ListBoxRow::new();
         let tab_box = gtk::Box::builder()
-            .spacing(6)
+            .spacing(12)
             .margin_top(6)
             .margin_bottom(6)
             .margin_start(6)
@@ -1056,7 +1038,7 @@ impl SettingsUi {
             .build();
         tab_box.append(
             &gtk::Image::builder()
-                .icon_name("network-wired-symbolic")
+                .icon_name("tv-symbolic")
                 .pixel_size(24)
                 .build(),
         );
