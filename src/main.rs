@@ -1,7 +1,6 @@
 mod app;
 mod covers;
 mod details;
-mod mock;
 mod ratings;
 mod sample;
 mod ui;
@@ -9,51 +8,35 @@ mod ui;
 use gtk::gio;
 use gtk::gio::prelude::*;
 
-/// Usage shown for unknown arguments. `--mock` only exists in dev builds
-/// (`mock::AVAILABLE`), so release builds advertise only `--check-icons`.
-#[cfg(debug_assertions)]
-const USAGE: &str = "Usage: rtv [--mock] [--check-icons]";
-#[cfg(not(debug_assertions))]
+/// Usage shown for unknown arguments.
 const USAGE: &str = "Usage: rtv [--check-icons]";
 
 fn main() {
-    let args = std::env::args().skip(1);
-    for arg in args {
-        match arg.as_str() {
-            "--check-icons" => {
-                register_resources();
-                gtk::init().expect("gtk init");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(unexpected) = args.iter().find(|a| a.as_str() != "--check-icons") {
+        eprintln!("Unknown argument: {}\n{}", unexpected, USAGE);
+        std::process::exit(2);
+    }
+    if args.first().map(String::as_str) == Some("--check-icons") {
+        register_resources();
+        gtk::init().expect("gtk init");
 
-                // Mechanism: export to XDG_RUNTIME_DIR + display-theme search path.
-                crate::app::install_runtime_icons();
-                let display_theme =
-                    gtk::IconTheme::for_display(&gtk::gdk::Display::default().expect("display"));
-                for name in ["io.github.tunix.rtv", "rtv-heart-symbolic"] {
-                    let icon = display_theme.lookup_icon(
-                        name,
-                        &[],
-                        16,
-                        1,
-                        gtk::TextDirection::Ltr,
-                        gtk::IconLookupFlags::FORCE_REGULAR,
-                    );
-                    println!("{name}: {:?}", icon.file().map(|f| f.uri().to_string()));
-                }
-                return;
-            }
-            "--mock" => {
-                if mock::AVAILABLE {
-                    mock::set_enabled(true);
-                } else {
-                    eprintln!("--mock is only available in development builds\n{USAGE}");
-                    std::process::exit(2);
-                }
-            }
-            other => {
-                eprintln!("Unknown argument: {other}\n{USAGE}");
-                std::process::exit(2);
-            }
+        // Mechanism: export to XDG_RUNTIME_DIR + display-theme search path.
+        crate::app::install_runtime_icons();
+        let display_theme =
+            gtk::IconTheme::for_display(&gtk::gdk::Display::default().expect("display"));
+        for name in ["io.github.tunix.rtv", "rtv-heart-symbolic"] {
+            let icon = display_theme.lookup_icon(
+                name,
+                &[],
+                16,
+                1,
+                gtk::TextDirection::Ltr,
+                gtk::IconLookupFlags::FORCE_REGULAR,
+            );
+            println!("{name}: {:?}", icon.file().map(|f| f.uri().to_string()));
         }
+        return;
     }
 
     tracing_subscriber::fmt()

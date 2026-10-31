@@ -83,13 +83,6 @@ pub fn run() {
 
         let window = ui::window::Window::new(app);
         window.present();
-        // samples/ is an optional dev convenience in real mode — its absence
-        // only deserves a toast in mock mode, where the offline catalog is
-        // the whole point. Release builds fold `mock::enabled()` to `false`
-        // and stay silent.
-        if crate::mock::enabled() && window.sample_catalog_missing() {
-            window.toast("mock/ not found — the mock catalog is empty");
-        }
     });
 
     let quit = gio::SimpleAction::new("quit", None);
@@ -99,11 +92,7 @@ pub fn run() {
     }
     app.add_action(&quit);
 
-    // GApplication parses argv for its own options and aborts on unknown
-    // flags like --mock (glib "Unknown option", exit 0 before our loop
-    // even mattered). Run with ONLY the program name so the app-level
-    // option parsing sees nothing; --mock was already consumed in main().
-    app.run_with_args(&["rtv"][..]);
+    app.run();
 }
 
 fn load_css() {

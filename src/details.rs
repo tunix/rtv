@@ -3,10 +3,8 @@
 //! main loop, results delivered through a callback, in-memory caching,
 //! graceful failure — never blocking, never crashing.
 //!
-//! In `--mock` mode the committed `mock/series_info/` + `mock/vod_info/`
-//! datasets serve every request offline; no network request is made and
-//! `samples/user_info.json` is never touched. In real mode requests and
-//! credentials both come from `samples/user_info.json` (gitignored, still
+//! Requests and
+//! credentials come from `samples/user_info.json` (gitignored, still
 //! optional): the values are NEVER logged, printed or persisted — only
 //! placed into the request URL in memory.
 
@@ -38,10 +36,6 @@ fn server() -> Option<&'static Server> {
     static SERVER: OnceLock<Option<Server>> = OnceLock::new();
     SERVER
         .get_or_init(|| {
-            // Mock mode never touches credentials or the network.
-            if crate::mock::enabled() {
-                return None;
-            }
             #[derive(Deserialize)]
             struct UserFile {
                 user_info: UserCreds,
@@ -134,8 +128,7 @@ pub struct VodInfo {
 
 /// Fetch series info (seasons + episodes) asynchronously; `done` runs on
 /// the main loop with `None` on any failure. Results are cached in memory.
-/// Mock mode serves everything from the committed dataset, real mode goes
-/// to the panel API.
+/// Offline samples dumps win when present, otherwise the panel API is used.
 pub fn series_info(series_id: i64, done: impl FnOnce(Option<SeriesInfo>) + 'static) {
     if let Some(cached) = SERIES_CACHE.with(|c| c.borrow().get(&series_id).cloned()) {
         done(Some(cached));
@@ -144,7 +137,7 @@ pub fn series_info(series_id: i64, done: impl FnOnce(Option<SeriesInfo>) + 'stat
     let mut parsed = local_dump("series_info", series_id)
         .as_ref()
         .and_then(parse_series_info);
-    if parsed.is_none() && !crate::mock::enabled() {
+    if parsed.is_none() {
         let url = api_url(&format!("action=get_series_info&series_id={series_id}"));
         if let Some(url) = url {
             get_json(&url, move |value| {
@@ -167,8 +160,7 @@ pub fn series_info(series_id: i64, done: impl FnOnce(Option<SeriesInfo>) + 'stat
 
 /// Fetch VOD info (plot/genre/cast/...) asynchronously; `done` runs on the
 /// main loop with `None` on any failure. Results are cached in memory.
-/// Mock mode serves everything from the committed dataset, real mode goes
-/// to the panel API.
+/// Offline samples dumps win when present, otherwise the panel API is used.
 pub fn vod_info(vod_id: i64, done: impl FnOnce(Option<VodInfo>) + 'static) {
     if let Some(cached) = VOD_CACHE.with(|c| c.borrow().get(&vod_id).cloned()) {
         done(Some(cached));
@@ -177,7 +169,7 @@ pub fn vod_info(vod_id: i64, done: impl FnOnce(Option<VodInfo>) + 'static) {
     let mut parsed = local_dump("vod_info", vod_id)
         .as_ref()
         .and_then(parse_vod_info);
-    if parsed.is_none() && !crate::mock::enabled() {
+    if parsed.is_none() {
         let url = api_url(&format!("action=get_vod_info&vod_id={vod_id}"));
         if let Some(url) = url {
             get_json(&url, move |value| {
@@ -204,14 +196,12 @@ fn api_url(query: &str) -> Option<String> {
     server().map(|server| format!("{}&{}", server.base_url, query))
 }
 
-/// Offline dumps win over the network when they parse. In `--mock` mode the
-/// `mock/series_info/` + `mock/vod_info/` datasets are complete and fully
-/// replace the network; in real mode the gitignored
-/// `samples/<kind>/<kind>_<id>.json` dumps are an optional convenience.
-/// Unparsable dumps (e.g. a stale auth-failure body) fall through.
+/// Offline `samples/<kind>/<kind>_<id>.json` dumps win over the network
+/// when they parse; unparsable dumps (e.g. a stale auth-failure body)
+/// fall through to the network.
 fn local_dump(kind: &str, id: i64) -> Option<Value> {
     let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR")))
-        .join(crate::mock::data_dir())
+        .join("samples")
         .join(kind)
         .join(format!("{kind}_{id}.json"));
     let text = fs::read_to_string(path).ok()?;

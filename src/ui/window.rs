@@ -87,9 +87,6 @@ mod imp {
         pub player_page: TemplateChild<adw::NavigationPage>,
         #[template_child]
         pub dropdown_box: TemplateChild<gtk::Box>,
-        // Only read on dev builds (mock menu injection); release builds
-        // never touch it.
-        #[cfg_attr(not(debug_assertions), allow(dead_code))]
         #[template_child]
         pub menu_button: TemplateChild<gtk::MenuButton>,
         #[template_child]
@@ -161,9 +158,9 @@ mod imp {
         #[template_child]
         pub episodes_content: TemplateChild<gtk::Box>,
 
-        /// Sample catalog loaded from samples/ (mock phase).
+        /// Sample catalog loaded from the gitignored samples/ dumps.
         pub catalog: OnceLock<Catalog>,
-        /// UI-mock state.
+        /// UI state.
         pub playing: Cell<bool>,
         pub muted: Cell<bool>,
         pub has_source: Cell<bool>,
@@ -211,7 +208,7 @@ mod imp {
         /// Bumped on every open_details; stale async detail fillers no-op
         /// instead of touching a page that already shows other content.
         pub details_generation: Cell<u64>,
-        /// Configured sources (mock phase). Shared with the settings dialog.
+        /// Configured sources. Shared with the settings dialog.
         pub sources_model: Rc<SourcesModel>,
         /// Settings dialog (Sources tab), built lazily and cached for the
         /// window's lifetime so its navigation stack survives re-opens.
@@ -272,10 +269,6 @@ impl Window {
         window
     }
 
-    pub fn sample_catalog_missing(&self) -> bool {
-        !self.imp().catalog.get().map(|c| c.found).unwrap_or(false)
-    }
-
     fn imp(&self) -> &imp::Window {
         glib::subclass::types::ObjectSubclassIsExt::imp(self)
     }
@@ -312,19 +305,40 @@ impl Window {
         let has_source = !sources.is_empty();
         imp.has_source.set(has_source);
 
-        // Dropdown: one entry per source (or the placeholder). The mock
-        // browse catalog stays attached to the mock dataset; switching
+        // Dropdown: one entry per source (or the placeholder). The browse
+        // catalog stays attached to the samples/ dataset; switching
         // sources is silent until the backend phase wires real loading.
         let items: Vec<&str> = if sources.is_empty() {
             vec!["No sources"]
         } else {
             sources.iter().map(|s| s.name.as_str()).collect()
         };
-        let model = gtk::StringList::new(&items);
+        // Replacing the DropDown model (or selecting index 0 on a
+        // placeholder-only list) can trip an internal
+        // g_list_store_remove assertion in GTK; guard both calls so the
+        // model is only swapped when it actually changed and selection is
+        // only moved when there is something to select.
         let dropdown = imp.dropdown.borrow().clone();
         if let Some(dropdown) = dropdown {
-            dropdown.set_model(Some(&model));
-            dropdown.set_selected(0);
+            let changed = dropdown
+                .model()
+                .map(|m| {
+                    let current: Vec<String> = (0..m.n_items())
+                        .filter_map(|i| {
+                            m.item(i)
+                                .and_then(|o| o.downcast::<gtk::StringObject>().ok())
+                        })
+                        .map(|o| o.string().to_string())
+                        .collect();
+                    current != items.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+                })
+                .unwrap_or(true);
+            if changed {
+                dropdown.set_model(Some(&gtk::StringList::new(&items)));
+            }
+            if has_source {
+                dropdown.set_selected(0);
+            }
             dropdown.set_sensitive(has_source);
         }
     }
@@ -347,8 +361,8 @@ impl Window {
 
     fn setup_actions(&self) {
         // Sources are managed in the settings dialog (Sources tab): add,
-        // edit, delete. The mock phase keeps the dialog in-memory; the
-        // backend phase will replace the mock data with real fetching.
+        // edit, delete. The dialog keeps its state in-memory; the
+        // backend phase will replace this with real fetching.
         let win = self.downgrade();
         let add_source = gio::SimpleAction::new("add-source", None);
         add_source.connect_activate(move |_, _| {
@@ -356,36 +370,6 @@ impl Window {
             win.open_sources_dialog();
         });
         self.add_action(&add_source);
-
-        // Mock affordances — dev builds only (`mock::AVAILABLE`). The blp
-        // menu omits the reset item so release binaries carry no mock
-        // strings; dev builds rebuild the template menu with it and
-        // register the action that returns the UI to the locked first-run
-        // state.
-        #[cfg(debug_assertions)]
-        {
-            let menu_button = self.imp().menu_button.get();
-            let template_menu = menu_button.menu_model().expect("template primary menu");
-            menu_button.set_menu_model(Some(&inject_mock_reset(&template_menu)));
-
-            let win = self.downgrade();
-            let reset = gio::SimpleAction::new("reset-mock", None);
-            reset.connect_activate(move |_, _| {
-                let Some(win) = win.upgrade() else { return };
-                let imp = win.imp();
-                imp.sources_model.clear();
-                if let Some(dialog) = imp.sources_dialog.borrow().as_ref() {
-                    dialog.refresh();
-                }
-                imp.favorites.borrow_mut().clear();
-                *imp.current.borrow_mut() = None;
-                win.stop_pipeline();
-                win.rebuild_favorites();
-                win.sync_sources_ui();
-                imp.main_view.pop_to_page(&*imp.welcome_page);
-            });
-            self.add_action(&reset);
-        }
 
         // Classic media-player shortcuts (accelerators registered in app.rs).
         // They only act while the player page is on screen. Play/pause
@@ -2170,7 +2154,7 @@ impl TrailerSection {
 }
 
 /// Trailers listed as rows with a thumbnail; activating one plays it in
-/// the app (mock player) instead of leaving for a website. Returns None
+/// the demo player instead of leaving for a website. Returns None
 /// when there is nothing to list.
 fn trailers_section(
     win: &Window,
@@ -2453,7 +2437,7 @@ fn open_preview(parent: &impl glib::object::IsA<gtk::Widget>, texture: &gtk::gdk
 }
 
 /// Window size for the preview: the image's aspect ratio, scaled into a
-/// generous maximum (it may exceed the app window a little). Tiny mock
+/// generous maximum (it may exceed the app window a little). Tiny
 /// thumbnails are upscaled at most 3x so the window stays reasonable.
 fn preview_size(texture: &gtk::gdk::Texture) -> (i32, i32) {
     const MAX_W: f64 = 1200.0;
@@ -2860,109 +2844,5 @@ fn set_heart_active(button: &gtk::Button, active: bool) {
         button.add_css_class("active");
     } else {
         button.remove_css_class("active");
-    }
-}
-
-/// Dev builds only: rebuild the template menu with the mock-reset item
-/// appended to its first section. The blp menu omits the item so release
-/// binaries carry no mock strings; this copies every item (labels,
-/// sections and any links travel with `MenuItem::from_model`) and injects
-/// the reset entry after the first section's own items — falling back to
-/// the top level when the menu has no sections at all.
-#[cfg(debug_assertions)]
-fn inject_mock_reset(model: &gio::MenuModel) -> gio::Menu {
-    let menu = gio::Menu::new();
-    let mut injected = false;
-    for i in 0..model.n_items() {
-        match model.item_link(i, gio::MENU_LINK_SECTION) {
-            Some(section_model) => {
-                let section = gio::Menu::new();
-                for j in 0..section_model.n_items() {
-                    section.append_item(&gio::MenuItem::from_model(&section_model, j));
-                }
-                if !injected {
-                    section.append(Some("Reset mock state"), Some("win.reset-mock"));
-                    injected = true;
-                }
-                let label = model
-                    .item_attribute_value(
-                        i,
-                        gio::MENU_ATTRIBUTE_LABEL,
-                        Some(glib::VariantTy::STRING),
-                    )
-                    .and_then(|v| v.get::<String>());
-                menu.append_section(label.as_deref(), &section);
-            }
-            None => menu.append_item(&gio::MenuItem::from_model(model, i)),
-        }
-    }
-    if !injected {
-        menu.append(Some("Reset mock state"), Some("win.reset-mock"));
-    }
-    menu
-}
-
-#[cfg(test)]
-mod tests {
-    use super::inject_mock_reset;
-    use gio::prelude::*;
-    use gtk::{gio, glib};
-
-    /// Flat action list of a menu, descending into sections.
-    fn flat_actions(model: &gio::MenuModel) -> Vec<String> {
-        let mut out = Vec::new();
-        for i in 0..model.n_items() {
-            if let Some(section) = model.item_link(i, gio::MENU_LINK_SECTION) {
-                out.extend(flat_actions(&section));
-                continue;
-            }
-            if let Some(v) = model.item_attribute_value(
-                i,
-                gio::MENU_ATTRIBUTE_ACTION,
-                Some(glib::VariantTy::STRING),
-            ) {
-                if let Some(action) = v.get::<String>() {
-                    out.push(action);
-                }
-            }
-        }
-        out
-    }
-
-    #[test]
-    fn injects_the_reset_item_into_the_first_section() {
-        let first = gio::Menu::new();
-        first.append(Some("_Settings…"), Some("win.settings"));
-        first.append(Some("_Add source…"), Some("win.add-source"));
-        let second = gio::Menu::new();
-        second.append(Some("_About RTV"), Some("win.about"));
-        second.append(Some("_Quit"), Some("app.quit"));
-        let source = gio::Menu::new();
-        source.append_section(None, &first);
-        source.append_section(None, &second);
-
-        let rebuilt = inject_mock_reset(source.upcast_ref());
-        assert_eq!(
-            flat_actions(rebuilt.upcast_ref()),
-            [
-                "win.settings",
-                "win.add-source",
-                "win.reset-mock",
-                "win.about",
-                "app.quit"
-            ]
-        );
-    }
-
-    #[test]
-    fn injects_at_the_top_level_when_there_are_no_sections() {
-        let source = gio::Menu::new();
-        source.append(Some("_Settings…"), Some("win.settings"));
-
-        let rebuilt = inject_mock_reset(source.upcast_ref());
-        assert_eq!(
-            flat_actions(rebuilt.upcast_ref()),
-            ["win.settings", "win.reset-mock"]
-        );
     }
 }

@@ -1,8 +1,6 @@
 //! Sample source: exposes an in-memory catalog from credential-free JSON
-//! dumps. In `--mock` mode the committed `mock/` dataset is read (works
-//! everywhere, no network); in real mode the gitignored `samples/` dumps
-//! are used when present. This exercises the UI before the network/SQLite
-//! backend lands.
+//! dumps from the gitignored `samples/` directory. This exercises the UI
+//! with local data before the network/SQLite backend lands.
 
 use std::collections::HashMap;
 
@@ -175,10 +173,9 @@ fn parse<T: for<'de> Deserialize<'de>>(text: &str) -> Vec<T> {
     serde_json::from_str(text).unwrap_or_default()
 }
 
-/// Mock mode reads the committed `mock/` dataset, real mode the optional
-/// (gitignored) `samples/` dumps.
+/// Real mode reads the optional (gitignored) `samples/` dumps.
 fn dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"))).join(crate::mock::data_dir())
+    std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"))).join("samples")
 }
 
 impl Catalog {

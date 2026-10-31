@@ -1,7 +1,7 @@
-//! UI-mock sources layer behind the Settings dialog.
+//! Simulated sources layer behind the Settings dialog.
 //!
 //! Sources live in memory (`SourcesModel`): the "indexing" spinner, stats and
-//! category lists are all mock data. The backend phase will replace the
+//! category lists are all simulated data. The backend phase will replace the
 //! model with real fetching/persistence; the dialog layout stays.
 //!
 //! Layout mirrors valhalla's preferences: a plain [`adw::Dialog`] holding a
@@ -89,7 +89,7 @@ impl SourceKind {
     }
 }
 
-/// Mock statistics shown once "indexing" finishes.
+/// Simulated statistics shown once "indexing" finishes.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Stats {
     pub live_cats: u32,
@@ -118,16 +118,16 @@ impl Stats {
     }
 }
 
-/// A top-level category with a mock visibility flag (the backend phase will
+/// A top-level category with a visibility flag (the backend phase will
 /// wire these switches into the grid-rendering filters).
 #[derive(Debug, Clone)]
-pub struct MockCategory {
+pub struct SimCategory {
     pub name: String,
     pub section: Section,
     pub visible: bool,
 }
 
-/// One configured source. `indexing` is the mock stand-in for the async
+/// One configured source. `indexing` is the stand-in for the async
 /// indexing step.
 #[derive(Debug, Clone)]
 pub struct Source {
@@ -136,7 +136,7 @@ pub struct Source {
     pub kind: SourceKind,
     pub indexing: bool,
     pub stats: Option<Stats>,
-    pub cats: Vec<MockCategory>,
+    pub cats: Vec<SimCategory>,
 }
 
 /// Shared in-memory source list, owned by the window and read/written by the
@@ -161,7 +161,7 @@ impl SourcesModel {
         self.next_id.set(0);
     }
 
-    /// Reserves the next id, hands it to the factory (mock stats are seeded
+    /// Reserves the next id, hands it to the factory (stats are seeded
     /// from it) and appends the result.
     pub fn add(&self, source_factory: impl FnOnce(u64) -> Source) -> u64 {
         let id = self.next_id.get();
@@ -181,7 +181,7 @@ impl SourcesModel {
         self.items.borrow_mut().retain(|s| s.id != id);
     }
 
-    /// Mock indexing: flips the source to ready.
+    /// Simulated indexing: flips the source to ready.
     pub fn set_ready(&self, id: u64) {
         let mut items = self.items.borrow_mut();
         if let Some(source) = items.iter_mut().find(|s| s.id == id) {
@@ -189,7 +189,7 @@ impl SourcesModel {
         }
     }
 
-    /// Toggles one category's mock visibility flag.
+    /// Toggles one category's visibility flag.
     pub fn set_category_visible(&self, id: u64, section: Section, name: &str, visible: bool) {
         let mut items = self.items.borrow_mut();
         if let Some(source) = items.iter_mut().find(|s| s.id == id) {
@@ -210,7 +210,7 @@ fn filled<T: glib::object::IsA<gtk::Editable>>(row: &glib::WeakRef<T>) -> bool {
         .unwrap_or(false)
 }
 
-/// Thousands separator for the mock stats ("24,300").
+/// Thousands separator for the stats ("24,300").
 fn fmt_count(n: u32) -> String {
     let digits = n.to_string();
     let len = digits.len();
@@ -237,7 +237,7 @@ fn source_subtitle(source: &Source) -> String {
     }
 }
 
-/// Counts entries in one of the local dumps (mock/ or samples/); mock stats
+/// Counts entries in one of the local dumps (samples/); stats
 /// prefer real local data so numbers look plausible.
 fn count_json(path: &str) -> Option<u32> {
     let text = std::fs::read_to_string(path).ok()?;
@@ -307,19 +307,19 @@ fn local_category_names(data_dir: &str, section: Section) -> Vec<String> {
 }
 
 /// Canned M3U group names (the M3U backend is a stub).
-fn mock_m3u_groups() -> Vec<String> {
+fn sim_m3u_groups() -> Vec<String> {
     ["Sports", "News", "Entertainment", "Kids", "Music", "24/7"]
         .iter()
         .map(|s| s.to_string())
         .collect()
 }
 
-/// Mock stats for a fresh source: item counts scaled from the local dump
-/// sizes so the UX resembles a real provider's catalog size.
-fn mock_stats(id: u64, kind: &SourceKind, data_dir: &str) -> Stats {
+/// Simulated stats for a fresh source: item counts scaled from the local
+/// dump sizes so the UX resembles a real provider's catalog size.
+fn sim_stats(id: u64, kind: &SourceKind, data_dir: &str) -> Stats {
     if matches!(kind, SourceKind::M3U { .. }) {
         let scale = 1 + (id % 4) as u32;
-        let groups = mock_m3u_groups().len() as u32;
+        let groups = sim_m3u_groups().len() as u32;
         return Stats {
             live_cats: groups,
             live_items: 4_200 * scale,
@@ -346,12 +346,12 @@ fn mock_stats(id: u64, kind: &SourceKind, data_dir: &str) -> Stats {
 
 /// Builds a fresh in-memory source (still indexing, stats pre-computed).
 fn new_source(id: u64, name: &str, kind: SourceKind) -> Source {
-    let data_dir = crate::mock::data_dir();
-    let stats = mock_stats(id, &kind, data_dir);
+    let data_dir = "samples";
+    let stats = sim_stats(id, &kind, data_dir);
     let cats = match kind {
-        SourceKind::M3U { .. } => mock_m3u_groups()
+        SourceKind::M3U { .. } => sim_m3u_groups()
             .into_iter()
-            .map(|name| MockCategory {
+            .map(|name| SimCategory {
                 name,
                 section: Section::Live,
                 visible: true,
@@ -362,7 +362,7 @@ fn new_source(id: u64, name: &str, kind: SourceKind) -> Source {
             .flat_map(|&section| {
                 local_category_names(data_dir, section)
                     .into_iter()
-                    .map(|name| MockCategory {
+                    .map(|name| SimCategory {
                         name,
                         section,
                         visible: true,
@@ -381,7 +381,7 @@ fn new_source(id: u64, name: &str, kind: SourceKind) -> Source {
     }
 }
 
-/// Tracking for the open per-source detail page: re-renders after mock
+/// Tracking for the open per-source detail page: re-renders after
 /// indexing finishes and cleans up when the page pops.
 #[derive(Default)]
 struct DetailState {
@@ -813,7 +813,7 @@ impl Ctx {
         nav.push(&nav_page);
     }
 
-    /// Per-source subpage: stats overview + mock category visibility.
+    /// Per-source subpage: stats overview + category visibility.
     fn push_detail(&self, id: u64) {
         let Some(nav) = self.nav.upgrade() else {
             return;
@@ -850,7 +850,7 @@ impl Ctx {
         nav.push(&nav_page);
     }
 
-    /// Re-renders the open detail page after mock indexing finished.
+    /// Re-renders the open detail page after simulated indexing finished.
     fn rebuild_detail(&self, id: u64) {
         let Some(source) = self.model.get(id) else {
             return;
@@ -1075,6 +1075,11 @@ impl SettingsUi {
 
         let dialog = adw::Dialog::builder()
             .title("Settings")
+            // Explicit minimum size: Adwaita warns loudly ("AdwDialog does
+            // not have a minimum size") when only content_width/height are
+            // set — width-request/height-request silence that.
+            .width_request(360)
+            .height_request(360)
             .content_width(820)
             .content_height(600)
             .child(&toasts)
@@ -1179,7 +1184,7 @@ impl SettingsUi {
         self.dialog.present(Some(win));
     }
 
-    /// Rebuilds the rows without presenting (mock reset).
+    /// Rebuilds the rows without presenting (used by the reset action).
     pub fn refresh(&self) {
         self.ctx.refresh();
     }
