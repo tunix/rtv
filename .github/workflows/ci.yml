@@ -35,7 +35,7 @@ jobs:
       - name: Install toolchain
         run: >
           dnf install -y rust cargo rustfmt clippy gcc pkgconf-pkg-config
-          gtk4-devel libadwaita-devel libsoup3-devel glib2-devel gstreamer1-devel gstreamer1-plugins-base-devel blueprint-compiler git
+          gtk4-devel libadwaita-devel libsoup3-devel glib2-devel gstreamer1-devel gstreamer1-plugins-base-devel blueprint-compiler git dbus-devel
 
       - name: Cache cargo artifacts
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
