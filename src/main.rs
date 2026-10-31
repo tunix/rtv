@@ -1,14 +1,23 @@
 mod app;
 mod covers;
 mod details;
+mod ratings;
 mod sample;
 mod ui;
 
 use gtk::gio;
 use gtk::gio::prelude::*;
 
+/// Usage shown for unknown arguments.
+const USAGE: &str = "Usage: rtv [--check-icons]";
+
 fn main() {
-    if std::env::args().nth(1).as_deref() == Some("--check-icons") {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(unexpected) = args.iter().find(|a| a.as_str() != "--check-icons") {
+        eprintln!("Unknown argument: {}\n{}", unexpected, USAGE);
+        std::process::exit(2);
+    }
+    if args.first().map(String::as_str) == Some("--check-icons") {
         register_resources();
         gtk::init().expect("gtk init");
 

@@ -1,10 +1,11 @@
-//! On-demand content details (mock phase): Xtream `get_series_info` and
-//! `get_vod_info` calls against the sample panel, mirroring `covers.rs`:
-//! libsoup3 on the GLib main loop, results delivered through a callback,
-//! in-memory caching, graceful failure — never blocking, never crashing.
+//! On-demand content details: Xtream `get_series_info` and `get_vod_info`
+//! calls against the panel, mirroring `covers.rs`: libsoup3 on the GLib
+//! main loop, results delivered through a callback, in-memory caching,
+//! graceful failure — never blocking, never crashing.
 //!
-//! Requests and credentials both come from `samples/user_info.json`
-//! (gitignored): the values are NEVER logged, printed or persisted — only
+//! Requests and
+//! credentials come from `samples/user_info.json` (gitignored, still
+//! optional): the values are NEVER logged, printed or persisted — only
 //! placed into the request URL in memory.
 
 use std::{cell::RefCell, collections::HashMap, fs, sync::OnceLock};
@@ -17,10 +18,10 @@ use soup::prelude::*;
 /// The panel's origin filters User-Agents (see AGENTS.md): requests with
 /// CLI UAs get the connection killed and Cloudflare reports HTTP 520.
 /// Every request MUST present an app-like User-Agent.
-const USER_AGENT: &str = "okhttp/4.9.3";
+pub const USER_AGENT: &str = "okhttp/4.9.3";
 
 thread_local! {
-    static SESSION: soup::Session = soup::Session::new();
+    static SESSION: soup::Session = soup::Session::builder().timeout(30).build();
     static SERIES_CACHE: RefCell<HashMap<i64, SeriesInfo>> = RefCell::new(HashMap::new());
     static VOD_CACHE: RefCell<HashMap<i64, VodInfo>> = RefCell::new(HashMap::new());
 }
@@ -96,8 +97,11 @@ pub struct Season {
 pub struct Episode {
     pub number: i64,
     pub title: String,
-    pub container: Option<String>,
     pub duration: Option<String>,
+    /// Short summary from `info.plot`, shown on the episode rows.
+    pub plot: Option<String>,
+    /// Episode thumbnail (`info.movie_image`), shown on the episode rows.
+    pub image: Option<String>,
 }
 
 /// Parsed `get_series_info` response. A season listed in `seasons[]` may
@@ -118,60 +122,72 @@ pub struct VodInfo {
     pub director: Option<String>,
     pub duration: Option<String>,
     pub release_date: Option<String>,
+    /// YouTube trailer link, when the panel carries one.
+    pub trailer: Option<String>,
 }
 
 /// Fetch series info (seasons + episodes) asynchronously; `done` runs on
 /// the main loop with `None` on any failure. Results are cached in memory.
+/// Offline samples dumps win when present, otherwise the panel API is used.
 pub fn series_info(series_id: i64, done: impl FnOnce(Option<SeriesInfo>) + 'static) {
     if let Some(cached) = SERIES_CACHE.with(|c| c.borrow().get(&series_id).cloned()) {
         done(Some(cached));
         return;
     }
-    if let Some(value) = local_dump("series_info", series_id) {
-        if let Some(info) = parse_series_info(&value) {
-            SERIES_CACHE.with(|c| c.borrow_mut().insert(series_id, info.clone()));
-            done(Some(info));
+    let mut parsed = local_dump("series_info", series_id)
+        .as_ref()
+        .and_then(parse_series_info);
+    if parsed.is_none() {
+        let url = api_url(&format!("action=get_series_info&series_id={series_id}"));
+        if let Some(url) = url {
+            get_json(&url, move |value| {
+                let result = value.as_ref().and_then(parse_series_info);
+                if let Some(info) = &result {
+                    SERIES_CACHE.with(|c| c.borrow_mut().insert(series_id, info.clone()));
+                }
+                done(result);
+            });
             return;
         }
     }
-    let Some(url) = api_url(&format!("action=get_series_info&series_id={series_id}")) else {
+    if let Some(info) = parsed.take() {
+        SERIES_CACHE.with(|c| c.borrow_mut().insert(series_id, info.clone()));
+        done(Some(info));
+    } else {
         done(None);
-        return;
-    };
-    get_json(&url, move |value| {
-        let parsed = value.as_ref().and_then(parse_series_info);
-        if let Some(info) = &parsed {
-            SERIES_CACHE.with(|c| c.borrow_mut().insert(series_id, info.clone()));
-        }
-        done(parsed);
-    });
+    }
 }
 
 /// Fetch VOD info (plot/genre/cast/...) asynchronously; `done` runs on the
 /// main loop with `None` on any failure. Results are cached in memory.
+/// Offline samples dumps win when present, otherwise the panel API is used.
 pub fn vod_info(vod_id: i64, done: impl FnOnce(Option<VodInfo>) + 'static) {
     if let Some(cached) = VOD_CACHE.with(|c| c.borrow().get(&vod_id).cloned()) {
         done(Some(cached));
         return;
     }
-    if let Some(value) = local_dump("vod_info", vod_id) {
-        if let Some(info) = parse_vod_info(&value) {
-            VOD_CACHE.with(|c| c.borrow_mut().insert(vod_id, info.clone()));
-            done(Some(info));
+    let mut parsed = local_dump("vod_info", vod_id)
+        .as_ref()
+        .and_then(parse_vod_info);
+    if parsed.is_none() {
+        let url = api_url(&format!("action=get_vod_info&vod_id={vod_id}"));
+        if let Some(url) = url {
+            get_json(&url, move |value| {
+                let result = value.as_ref().and_then(parse_vod_info);
+                if let Some(info) = &result {
+                    VOD_CACHE.with(|c| c.borrow_mut().insert(vod_id, info.clone()));
+                }
+                done(result);
+            });
             return;
         }
     }
-    let Some(url) = api_url(&format!("action=get_vod_info&vod_id={vod_id}")) else {
+    if let Some(info) = parsed.take() {
+        VOD_CACHE.with(|c| c.borrow_mut().insert(vod_id, info.clone()));
+        done(Some(info));
+    } else {
         done(None);
-        return;
-    };
-    get_json(&url, move |value| {
-        let parsed = value.as_ref().and_then(parse_vod_info);
-        if let Some(info) = &parsed {
-            VOD_CACHE.with(|c| c.borrow_mut().insert(vod_id, info.clone()));
-        }
-        done(parsed);
-    });
+    }
 }
 
 /// Compose the player_api.php URL for one action. Credentials only ever
@@ -180,9 +196,9 @@ fn api_url(query: &str) -> Option<String> {
     server().map(|server| format!("{}&{}", server.base_url, query))
 }
 
-/// Offline-first: local dumps (`samples/series_info/series_info_<id>.json`,
-/// `samples/vod_info/vod_info_<id>.json`) win over the network. Unparsable
-/// dumps (e.g. a stale auth-failure body) fall through to the network.
+/// Offline `samples/<kind>/<kind>_<id>.json` dumps win over the network
+/// when they parse; unparsable dumps (e.g. a stale auth-failure body)
+/// fall through to the network.
 fn local_dump(kind: &str, id: i64) -> Option<Value> {
     let path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR")))
         .join("samples")
@@ -275,8 +291,12 @@ fn parse_series_info(value: &Value) -> Option<SeriesInfo> {
                                 number,
                                 title: str_field(e, "title")
                                     .unwrap_or_else(|| format!("Episode {number}")),
-                                container: str_field(e, "container_extension"),
                                 duration: e.get("info").and_then(|i| str_field(i, "duration")),
+                                plot: e.get("info").and_then(|i| str_field(i, "plot")),
+                                image: e
+                                    .get("info")
+                                    .and_then(|i| str_field(i, "movie_image"))
+                                    .or_else(|| str_field(e, "movie_image")),
                             }
                         })
                         .collect()
@@ -311,6 +331,7 @@ fn parse_vod_info(value: &Value) -> Option<VodInfo> {
         director: str_field(info, "director"),
         duration: str_field(info, "duration"),
         release_date: str_field(info, "releasedate").or_else(|| str_field(info, "releaseDate")),
+        trailer: str_field(info, "youtube_trailer"),
     })
 }
 
@@ -339,7 +360,6 @@ mod tests {
         let episodes = &info.episodes[&1];
         assert_eq!(episodes.len(), 10);
         assert_eq!(episodes[0].number, 1);
-        assert_eq!(episodes[0].container.as_deref(), Some("mkv"));
         assert!(episodes[0].duration.is_some());
         // The season without an episodes entry still yields an empty list.
         assert!(info.episodes.get(&0).unwrap_or(&Vec::new()).is_empty());

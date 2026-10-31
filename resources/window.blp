@@ -50,7 +50,7 @@ template $RtvWindow : Adw.ApplicationWindow {
             };
 
             [end]
-            Gtk.MenuButton {
+            Gtk.MenuButton menu_button {
               primary: true;
               icon-name: "open-menu-symbolic";
               tooltip-text: _("Main Menu");
@@ -82,6 +82,7 @@ template $RtvWindow : Adw.ApplicationWindow {
                   hscrollbar-policy: never;
 
                   child: Gtk.ListBox content_list {
+                    activate-on-single-click: true;
                     styles ["navigation-sidebar"]
                   };
                 }
@@ -164,7 +165,7 @@ template $RtvWindow : Adw.ApplicationWindow {
                   Gtk.StackPage {
                     name: "empty";
                     child: Adw.StatusPage {
-                      icon-name: "emblem-favorite-symbolic";
+                      icon-name: "rtv-heart-symbolic";
                       title: _("No favorites yet");
                       description: _("Heart your favorite content to find it here.");
                     };
@@ -182,18 +183,13 @@ template $RtvWindow : Adw.ApplicationWindow {
                         child: Adw.Clamp {
                           maximum-size: 1000;
 
-                          child: Gtk.FlowBox favorites_grid {
+                          child: Gtk.Box favorites_box {
+                            orientation: vertical;
+                            spacing: 18;
                             margin-top: 12;
                             margin-start: 12;
                             margin-end: 12;
                             margin-bottom: 12;
-                            column-spacing: 12;
-                            row-spacing: 12;
-                            min-children-per-line: 3;
-                            max-children-per-line: 5;
-                            activate-on-single-click: true;
-                            selection-mode: none;
-                            valign: start;
                           };
                         };
                       }
@@ -249,6 +245,12 @@ template $RtvWindow : Adw.ApplicationWindow {
               };
 
               [overlay]
+              Gtk.Picture video_surface {
+                content-fit: cover;
+                visible: false;
+              }
+
+              [overlay]
               Gtk.Image app_watermark {
                 icon-name: "io.github.tunix.rtv";
                 pixel-size: 240;
@@ -267,55 +269,93 @@ template $RtvWindow : Adw.ApplicationWindow {
                 reveal-child: true;
 
                 child: Gtk.Box controls {
-                  spacing: 6;
+                  orientation: vertical;
+                  spacing: 8;
                   styles ["controls"]
 
-                  Gtk.Button seek_back {
-                    icon-name: "media-seek-backward-symbolic";
-                    tooltip-text: _("Back 10 seconds");
-                    styles ["flat"]
-                  }
-
-                  Gtk.Button play_button_small {
-                    icon-name: "media-playback-start-symbolic";
-                    tooltip-text: _("Play / Pause");
-                    styles ["flat"]
-                  }
-
-                  Gtk.Button seek_forward {
-                    icon-name: "media-seek-forward-symbolic";
-                    tooltip-text: _("Forward 10 seconds");
-                    styles ["flat"]
-                  }
-
-                  Gtk.Button mute_button {
-                    icon-name: "audio-volume-high-symbolic";
-                    tooltip-text: _("Mute / Unmute");
-                    styles ["flat"]
-                  }
-
-                  Gtk.Scale volume_scale {
-                    orientation: horizontal;
-                    width-request: 100;
-                    draw-value: false;
+                  Gtk.Box scrub_row {
+                    spacing: 8;
+                    margin-top: 10;
+                    margin-start: 10;
+                    margin-end: 10;
+                    margin-bottom: 10;
                     valign: center;
-                    adjustment: Gtk.Adjustment {
-                      lower: 0.0;
-                      upper: 1.0;
-                      value: 0.7;
-                      step-increment: 0.05;
-                      page-increment: 0.1;
-                    };
+
+                    Gtk.Label elapsed_label {
+                      label: "0:00";
+                      styles ["caption", "numeric"]
+                    }
+                    Gtk.Scale seek_scale {
+                      orientation: horizontal;
+                      hexpand: true;
+                      draw-value: false;
+                      adjustment: Gtk.Adjustment {
+                        lower: 0;
+                        upper: 100;
+                        value: 0;
+                        step-increment: 5;
+                        page-increment: 30;
+                      };
+                    }
+                    Gtk.Label duration_label {
+                      label: "0:00";
+                      styles ["caption", "numeric"]
+                    }
                   }
 
-                  Gtk.Button fullscreen_button {
-                    icon-name: "view-fullscreen-symbolic";
-                    tooltip-text: _("Fullscreen");
-                    styles ["flat"]
+                  Gtk.Box button_row {
+                    spacing: 8;
+                    margin-start: 14;
+                    margin-end: 14;
+                    margin-bottom: 10;
+                    valign: center;
+
+                    Gtk.Button seek_back {
+                      icon-name: "media-seek-backward-symbolic";
+                      tooltip-text: _("Back 10 seconds");
+                      styles ["flat"]
+                    }
+
+                    Gtk.Button play_button_small {
+                      icon-name: "media-playback-start-symbolic";
+                      tooltip-text: _("Play / Pause");
+                      styles ["flat"]
+                    }
+
+                    Gtk.Button seek_forward {
+                      icon-name: "media-seek-forward-symbolic";
+                      tooltip-text: _("Forward 10 seconds");
+                      styles ["flat"]
+                    }
+
+                    Gtk.Button mute_button {
+                      icon-name: "audio-volume-high-symbolic";
+                      tooltip-text: _("Mute / Unmute");
+                      styles ["flat"]
+                    }
+
+                    Gtk.Scale volume_scale {
+                      orientation: horizontal;
+                      width-request: 100;
+                      draw-value: false;
+                      valign: center;
+                      adjustment: Gtk.Adjustment {
+                        lower: 0.0;
+                        upper: 1.0;
+                        value: 0.7;
+                        step-increment: 0.05;
+                        page-increment: 0.1;
+                      };
+                    }
+
+                    Gtk.Button fullscreen_button {
+                      icon-name: "view-fullscreen-symbolic";
+                      tooltip-text: _("Fullscreen");
+                      styles ["flat"]
+                    }
                   }
                 };
               }
-
               [overlay]
               Gtk.Label live_badge {
                 label: "LIVE";
@@ -347,17 +387,23 @@ template $RtvWindow : Adw.ApplicationWindow {
           };
         };
       }
-    };
 
     /* Content details: series or movie body built from Rust. */
-    Adw.NavigationPage detail_page {
+      Adw.NavigationPage detail_page {
       title: _("Details");
       can-pop: true;
 
       child: Adw.ToolbarView {
 
         [top]
-        Adw.HeaderBar {}
+        Adw.HeaderBar {
+          [end]
+          Gtk.Button detail_heart {
+            icon-name: "rtv-heart-symbolic";
+            tooltip-text: _("Toggle favorite");
+            styles ["flat", "heart-btn"]
+          }
+        }
 
         content: Gtk.ScrolledWindow {
           hscrollbar-policy: never;
@@ -376,11 +422,11 @@ template $RtvWindow : Adw.ApplicationWindow {
           };
         };
       };
-    }
+      }
 
-    /* Episodes of one season, pushed on top of the series details. */
-    Adw.NavigationPage episodes_page {
-      title: _("Season");
+      /* Episodes of one season: detail header on top, episodes below. */
+      Adw.NavigationPage episodes_page {
+      title: _("Episodes");
       can-pop: true;
 
       child: Adw.ToolbarView {
@@ -394,30 +440,34 @@ template $RtvWindow : Adw.ApplicationWindow {
           child: Adw.Clamp {
             maximum-size: 720;
 
-            child: Gtk.ListBox episodes_list {
+            child: Gtk.Box episodes_content {
+              orientation: vertical;
+              spacing: 12;
               margin-top: 12;
               margin-start: 12;
               margin-end: 12;
               margin-bottom: 24;
-              selection-mode: none;
-              styles ["boxed-list"]
             };
           };
         };
       };
-    }
+      }
+    };
   };
 }
 
+/* The mock-reset item is injected in code on dev builds only (see
+ * Window::setup_actions): the release gresource must carry no mock
+ * strings. */
 menu primary_menu {
   section {
     item {
-      label: _("_Add source…");
-      action: "win.add-source";
+      label: _("_Settings…");
+      action: "win.settings";
     }
     item {
-      label: _("Reset mock state");
-      action: "win.reset-mock";
+      label: _("_Add source…");
+      action: "win.add-source";
     }
   }
   section {

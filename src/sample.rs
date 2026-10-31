@@ -1,13 +1,13 @@
-//! Sample source: reads the credential-free dumps in `samples/` (gitignored)
-//! and exposes them as an in-memory catalog. This exercises the UI at real
-//! scale (~30k items) before the network/SQLite backend lands.
+//! Sample source: exposes an in-memory catalog from credential-free JSON
+//! dumps from the gitignored `samples/` directory. This exercises the UI
+//! with local data before the network/SQLite backend lands.
 
 use std::collections::HashMap;
 
 use serde::Deserialize;
 use serde_json::Value;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
     Live,
     Series,
@@ -15,7 +15,8 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 3] = [Kind::Live, Kind::Series, Kind::Vod];
+    /// Sidebar display order: Live TV, Movies, Series.
+    pub const SIDEBAR: [Kind; 3] = [Kind::Live, Kind::Vod, Kind::Series];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -27,7 +28,9 @@ impl Kind {
 
     pub fn icon(self) -> &'static str {
         match self {
-            Kind::Live => "video-display-symbolic",
+            // Three clearly distinct monochrome shapes: a TV set, a video
+            // collection and a film strip.
+            Kind::Live => "tv-symbolic",
             Kind::Series => "folder-videos-symbolic",
             Kind::Vod => "video-x-generic-symbolic",
         }
@@ -170,6 +173,7 @@ fn parse<T: for<'de> Deserialize<'de>>(text: &str) -> Vec<T> {
     serde_json::from_str(text).unwrap_or_default()
 }
 
+/// Real mode reads the optional (gitignored) `samples/` dumps.
 fn dir() -> std::path::PathBuf {
     std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"))).join("samples")
 }

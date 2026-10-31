@@ -16,7 +16,7 @@ use gtk::glib;
 use soup::prelude::*;
 
 thread_local! {
-    static SESSION: soup::Session = soup::Session::new();
+    static SESSION: soup::Session = soup::Session::builder().timeout(30).build();
 }
 
 fn cache_dir() -> PathBuf {
