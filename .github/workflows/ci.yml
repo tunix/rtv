@@ -24,8 +24,11 @@ permissions:
 jobs:
   checks:
     name: Build, test, lint
+    needs: coverage
     runs-on: ubuntu-latest
     container: fedora:latest
+    # Baseline ~9 min; a hung job must not run to the 6-hour default.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -70,6 +73,7 @@ jobs:
           | build | ${{ steps.build.outcome == 'success' && '✅' || '❌' }} |
           | test | ${{ steps.test.outcome == 'success' && '✅' || '❌' }} |
           | clippy | ${{ steps.clippy.outcome == 'success' && '✅' || '❌' }} |
+          | coverage | ${{ needs.coverage.outputs.pct || 'n/a' }}% (min 12%) |
           EOF
 
       - name: Summarize on the PR
@@ -79,6 +83,7 @@ jobs:
           BUILD: ${{ steps.build.outcome }}
           TEST: ${{ steps.test.outcome }}
           CLIPPY: ${{ steps.clippy.outcome }}
+          COV: ${{ needs.coverage.outputs.pct }}
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
@@ -94,6 +99,7 @@ jobs:
               `| build | ${mark(process.env.BUILD)} |`,
               `| test | ${mark(process.env.TEST)} |`,
               `| clippy | ${mark(process.env.CLIPPY)} |`,
+              `| coverage | ${process.env.COV || 'n/a'}% |`,
               '',
               `[Full run](${runUrl})`,
               '<!-- rtv-ci-summary -->',
@@ -113,6 +119,98 @@ jobs:
             } else {
               await github.rest.issues.createComment({ ...opts, body });
             }
+
+  coverage:
+    name: Test coverage
+    if: github.event_name == 'pull_request'
+    outputs:
+      pct: ${{ steps.cov.outputs.pct }}
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    # Baseline ~3 min (valhalla parity); a hung job must not run to the
+    # 6-hour default.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # cargo-llvm-cov drives rustc's -C instrument-coverage; the llvm-tools
+      # component supplies llvm-profdata/llvm-cov for report generation.
+      - name: Install toolchain
+        run: >
+          dnf install -y clang gcc pkgconf-pkg-config
+          gtk4-devel libadwaita-devel libsoup3-devel glib2-devel
+          gstreamer1-devel gstreamer1-plugins-base-devel blueprint-compiler git
+
+      - name: Install rustup + toolchain
+        run: |
+          set -eu
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component llvm-tools-preview
+          . "$HOME/.cargo/env"
+          rustc --version
+
+      - name: Install cargo-llvm-cov
+        run: |
+          set -eu
+          mkdir -p ~/.cargo/bin
+          curl -sSfL -o ~/.cargo/bin/cargo-llvm-cov.tar.gz \
+            "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.9.1/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz"
+          tar -xzf ~/.cargo/bin/cargo-llvm-cov.tar.gz -C ~/.cargo/bin
+          chmod 0755 ~/.cargo/bin/cargo-llvm-cov
+
+      - name: Cache cargo artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            /root/.cargo/registry
+            /root/.cargo/git
+          key: fedora-cargo-cov-${{ hashFiles('Cargo.lock') }}
+          restore-keys: fedora-cargo-cov-
+
+      - name: Run tests with coverage
+        run: |
+          set -eu
+          . "$HOME/.cargo/env"
+          mkdir -p coverage
+          cargo llvm-cov --lcov --output-path coverage/lcov.info | tee coverage/summary.txt
+
+      # Gate: coverage must stay at or above MIN_COVERAGE. Raise the bar as
+      # test coverage grows — never lower it.
+      - name: Extract coverage total
+        id: cov
+        env:
+          MIN_COVERAGE: "12.0"
+        run: |
+          set -eu
+          read HIT FOUND <<<"$(awk '
+            /^LH:/ {h += substr($0, 4)} /^LF:/ {f += substr($0, 4)}
+            END {printf "%d %d", h, f}' coverage/lcov.info)"
+          PCT=$(python3 -c "print(f'{100 * $HIT / max($FOUND, 1):.1f}')")
+          echo "pct=$PCT" >> "$GITHUB_OUTPUT"
+          echo "Coverage: $HIT/$FOUND lines ($PCT%)"
+          python3 -c "
+          pct, min_pct = float('$PCT'), float('$MIN_COVERAGE')
+          print(f'Coverage {pct}% (minimum {min_pct}%)')
+          if pct < min_pct:
+              print(f'::error::Coverage {pct}% is below the required {min_pct}%')
+              raise SystemExit(1)
+          "
+
+      # Reports surface as job artifacts on the PR's workflow run page.
+      - name: Upload coverage report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-report
+          path: coverage/
+          if-no-files-found: error
+
+      - name: Job summary
+        if: always()
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## Coverage
+          Line coverage: **${{ steps.cov.outputs.pct || 'n/a' }}%**
+          Artifacts: lcov.info (+ HTML view via genhtml if present).
+          EOF
 
   label:
     name: Label PR

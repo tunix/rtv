@@ -11,19 +11,11 @@ concurrency:
 
 name: Release
 
-on:
-  # Deliberately NOT path-gated: release-please must observe every merge to
-  # keep the changelog complete, and it is a no-op when no release is due.
-  # The artifacts job only runs when a release is actually created.
-  push:
-    branches: [main]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Existing tag to (re)attach artifacts to"
-        required: true
-        type: string
-
+# RELEASES PAUSED (user decision, 2026-10): no release planned for
+# the foreseeable future, so this workflow is disabled. To re-enable,
+# replace the `on: false` below with the original triggers from git
+# history.
+on: false
 permissions:
   contents: write
   pull-requests: write
