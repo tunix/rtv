@@ -3,11 +3,11 @@ name: Update metainfo releases
 # release-please maintains CHANGELOG.md but never the appstream metainfo;
 # without this job the packaged <releases> data drifts behind the actual
 # releases, which also makes `flatpak info` report the wrong Version.
-on:
-  push:
-    branches: [main]
-    paths: ["CHANGELOG.md"]
-
+# RELEASES PAUSED (user decision, 2026-10): no release planned for
+# the foreseeable future, so this workflow is disabled. To re-enable,
+# replace the `on: false` below with the original triggers from git
+# history.
+on: false
 permissions:
   contents: write
   pull-requests: write
