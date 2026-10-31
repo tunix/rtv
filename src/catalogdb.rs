@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS items (
     name        TEXT NOT NULL,
     icon        TEXT,
     rating      TEXT,
-    ext         TEXT,
+    url         TEXT,
     PRIMARY KEY (kind, item_id)
 );
 CREATE TABLE IF NOT EXISTS series_meta (
@@ -84,7 +84,7 @@ pub fn write(path: &Path, catalog: &Catalog) -> Result<(), Box<dyn std::error::E
     drop(stmt);
 
     let mut stmt = tx.prepare_cached(
-        "INSERT INTO items (kind, item_id, category_id, name, icon, rating, ext)
+        "INSERT INTO items (kind, item_id, category_id, name, icon, rating, url)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?;
     for item in &catalog.items {
@@ -95,7 +95,7 @@ pub fn write(path: &Path, catalog: &Catalog) -> Result<(), Box<dyn std::error::E
             &item.name,
             &item.icon,
             &item.rating,
-            &item.ext,
+            &item.url,
         ))?;
     }
     drop(stmt);
@@ -148,7 +148,7 @@ pub fn read(path: &Path) -> Result<Catalog, Box<dyn std::error::Error>> {
     drop(stmt);
 
     let mut stmt =
-        conn.prepare("SELECT kind, item_id, category_id, name, icon, rating, ext FROM items")?;
+        conn.prepare("SELECT kind, item_id, category_id, name, icon, rating, url FROM items")?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         catalog.items.push(Item {
@@ -158,7 +158,7 @@ pub fn read(path: &Path) -> Result<Catalog, Box<dyn std::error::Error>> {
             name: row.get(3)?,
             icon: row.get(4)?,
             rating: row.get(5)?,
-            ext: row.get(6)?,
+            url: row.get(6)?,
         });
     }
     drop(rows);

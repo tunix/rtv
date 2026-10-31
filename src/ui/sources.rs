@@ -475,7 +475,7 @@ impl Ctx {
     /// live counts (cheap: rows are rebuilt only on stage boundaries, a
     /// handful of times per ingest — not per item). Completion publishes
     /// the catalog to the window and flips the state to Ready.
-    fn start_ingest(&self, id: u64) {
+    pub fn start_ingest(&self, id: u64) {
         let Some(source) = self.model.get(id) else {
             return;
         };

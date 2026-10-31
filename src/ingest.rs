@@ -241,7 +241,7 @@ fn fetch_section(
                                     .and_then(Value::as_str)
                                     .filter(|r| !r.is_empty() && *r != "0" && *r != "null")
                                     .map(str::to_string),
-                                ext: None,
+                                url: None,
                             })
                         })
                         .collect()
@@ -267,7 +267,7 @@ fn fetch_section(
                                 .filter(|c| !c.is_empty() && *c != "null")
                                 .map(str::to_string),
                             rating: None,
-                            ext: None,
+                            url: None,
                         })
                     })
                     .collect(),
@@ -395,6 +395,7 @@ fn start_m3u(
         }
 
         let mut catalog = Catalog::default();
+        let mut next_id = 0i64;
         for (idx, group) in order.iter().enumerate() {
             let id = format!("m3u-{idx}");
             catalog.categories.push(Category {
@@ -403,16 +404,19 @@ fn start_m3u(
                 name: group.clone(),
                 visible: true,
             });
-            for (n, entry) in groups[group].iter().enumerate() {
+            // SQLite PK is (kind, item_id): ids must be unique across
+            // the WHOLE source, not per group — use a running counter.
+            for entry in groups[group].iter() {
                 catalog.items.push(Item {
                     kind: Kind::Live,
-                    id: n as i64,
+                    id: next_id,
                     category_id: id.clone(),
                     name: entry.name.clone(),
                     icon: None,
                     rating: None,
-                    ext: None,
+                    url: Some(entry.url.clone()),
                 });
+                next_id += 1;
             }
         }
         let progress = Progress {

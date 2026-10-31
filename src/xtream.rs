@@ -177,6 +177,11 @@ pub fn auth_check(creds: &XtreamCreds, done: impl FnOnce(bool) + 'static) {
 pub struct M3UEntry {
     pub name: String,
     pub group: String,
+    /// The entry's playback URL (may embed credentials — never logged).
+    /// Read by the ingest pipeline when building Items; the warning is
+    /// silenced there since xtream.rs itself never reads it back.
+    #[allow(dead_code)]
+    pub url: String,
 }
 
 pub fn parse_m3u(text: &str) -> Vec<M3UEntry> {
@@ -209,6 +214,7 @@ pub fn parse_m3u(text: &str) -> Vec<M3UEntry> {
             out.push(M3UEntry {
                 name,
                 group: pending_group.take().unwrap_or_default(),
+                url: line.to_string(),
             });
         } else {
             bad_attr_lines += 1;

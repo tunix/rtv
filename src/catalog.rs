@@ -57,8 +57,10 @@ pub struct Item {
     pub icon: Option<String>,
     /// Textual rating when the panel carries one ("0" = none).
     pub rating: Option<String>,
-    /// Container extension for playback URLs (vod/live; e.g. "mkv", "ts").
-    pub ext: Option<String>,
+    /// Playback URL for M3U entries (each entry carries its own);
+    /// Xtream items leave it None — their URLs are composed from the
+    /// source's credentials. NEVER logged.
+    pub url: Option<String>,
 }
 
 /// Offline series metadata — the series detail page renders it on top

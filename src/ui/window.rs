@@ -562,6 +562,123 @@ impl Window {
         self.catalog()
     }
 
+    /// Background re-ingest of one source (startup refresh path).
+    /// Mirrors the settings dialog's start_ingest pipeline without
+    /// needing the dialog: model update -> ingest::start -> publish.
+    fn background_ingest(&self, id: u64) {
+        let imp = self.imp();
+        let Some(source) = imp.sources_model.get(id) else {
+            return;
+        };
+        tracing::info!(target: "rtv::ingest", id, name = %source.name, "background ingest kicked off");
+        imp.sources_model.update(id, |s| {
+            s.state = crate::ui::sources::SourceState::Indexing;
+            s.failure = None;
+        });
+        self.sync_sources_ui();
+
+        let kind = source.kind.clone();
+        let win_weak = self.downgrade();
+        let model = imp.sources_model.clone();
+        let model2 = imp.sources_model.clone();
+        crate::ingest::start(
+            &kind,
+            move |progress| {
+                model2.update(id, |s| {
+                    s.live_cats = progress.live_cats as u32;
+                    s.live_items = progress.live_items as u32;
+                    s.vod_cats = progress.vod_cats as u32;
+                    s.vod_items = progress.vod_items as u32;
+                    s.series_cats = progress.series_cats as u32;
+                    s.series_items = progress.series_items as u32;
+                });
+            },
+            move |outcome| match outcome {
+                crate::ingest::IngestOutcome::Done(catalog) => {
+                    crate::store::save_catalog(id, &catalog);
+                    let counts = (
+                        catalog.item_count(Kind::Live) as u32,
+                        catalog.item_count(Kind::Vod) as u32,
+                        catalog.item_count(Kind::Series) as u32,
+                    );
+                    let snapshot = std::rc::Rc::new(catalog);
+                    model.update(id, |s| {
+                        s.state = crate::ui::sources::SourceState::Ready;
+                        s.failure = None;
+                        s.snapshot = Some(snapshot.clone());
+                        s.live_cats = snapshot
+                            .categories
+                            .iter()
+                            .filter(|c| c.kind == Kind::Live)
+                            .count() as u32;
+                        s.live_items = counts.0;
+                        s.vod_cats = snapshot
+                            .categories
+                            .iter()
+                            .filter(|c| c.kind == Kind::Vod)
+                            .count() as u32;
+                        s.vod_items = counts.1;
+                        s.series_cats = snapshot
+                            .categories
+                            .iter()
+                            .filter(|c| c.kind == Kind::Series)
+                            .count() as u32;
+                        s.series_items = counts.2;
+                    });
+                    if let Some(win) = win_weak.upgrade() {
+                        let active = win.active_source_id();
+                        if active == id {
+                            // The re-ingested source is the active one:
+                            // publish and, if browsing is still locked
+                            // (welcome screen), unlock it now.
+                            win.apply_catalog((*snapshot).clone());
+                            if !win.browse_unlocked() {
+                                win.unlock_browse();
+                            }
+                        } else if active == 0 {
+                            win.apply_catalog((*snapshot).clone());
+                            win.unlock_browse();
+                        }
+                        win.sync_sources_ui();
+                        win.toast("Source ready — catalog updated");
+                    }
+                    tracing::info!(target: "rtv::ingest", id, "background ingest DONE");
+                }
+                crate::ingest::IngestOutcome::Failed(message) => {
+                    model.update(id, |s| {
+                        s.state = crate::ui::sources::SourceState::Failed;
+                        s.failure = Some(message.clone());
+                        s.snapshot = None;
+                    });
+                    if let Some(win) = win_weak.upgrade() {
+                        win.toast(&format!("Background load failed: {message}"));
+                    }
+                    tracing::error!(target: "rtv::ingest", id, reason = %message, "background ingest FAILED");
+                }
+            },
+        );
+    }
+
+    /// Whether the browse page is already on the navigation stack.
+    pub fn browse_unlocked(&self) -> bool {
+        self.imp()
+            .main_view
+            .visible_page()
+            .map(|page| page == *self.imp().browse_page)
+            .unwrap_or(false)
+    }
+
+    /// Push the browse page (unlock browsing) if still on welcome.
+    pub fn unlock_browse(&self) {
+        let imp = self.imp();
+        imp.has_source.set(true);
+        if let Some(visible) = imp.main_view.visible_page() {
+            if visible == *imp.welcome_page {
+                imp.main_view.push(&*imp.browse_page);
+            }
+        }
+    }
+
     /// Id of the source currently picked in the dropdown (0 = none).
     pub fn active_source_id(&self) -> u64 {
         let imp = self.imp();
@@ -596,6 +713,35 @@ impl Window {
         // install_snapshot_provider replaces this when the dialog opens.
         let model = imp.sources_model.clone();
         self.install_snapshot_provider(move |id| model.get(id).and_then(|s| s.snapshot));
+        // Detail fetches (series/vod info) ride the ACTIVE source's
+        // credentials; M3U sources have no details API -> None.
+        let model2 = imp.sources_model.clone();
+        let dropdown2 = imp.dropdown.clone();
+        crate::details::install_creds_provider(move || {
+            let index = dropdown2
+                .borrow()
+                .as_ref()
+                .map(|d| d.selected())
+                .unwrap_or(0);
+            model2
+                .all()
+                .get(index as usize)
+                .and_then(|source| match &source.kind {
+                    crate::ui::sources::SourceKind::Xtream {
+                        server,
+                        username,
+                        password,
+                    } => {
+                        let base = crate::ingest::parse_server(server)?;
+                        Some(crate::xtream::XtreamCreds {
+                            base_url: base,
+                            username: username.clone(),
+                            password: password.clone(),
+                        })
+                    }
+                    crate::ui::sources::SourceKind::M3U { .. } => None,
+                })
+        });
         for source in &sources {
             imp.sources_model.reserve_ids_through(source.id);
         }
@@ -663,6 +809,27 @@ impl Window {
             imp.has_source.set(true);
             imp.main_view.push(&*imp.browse_page);
         }
+        // Background refresh (loading policy: never block, always
+        // surface progress): sources WITHOUT a stored catalog re-ingest
+        // now, in the background. Their rows flip to live counters; a
+        // finished ingest publishes its snapshot and heals the source.
+        let win_weak = self.downgrade();
+        let model = imp.sources_model.clone();
+        glib::idle_add_local_once(move || {
+            let Some(win) = win_weak.upgrade() else {
+                return;
+            };
+            for source in model.all() {
+                if crate::store::load_catalog(source.id).is_none() {
+                    tracing::info!(
+                        target: "rtv::store",
+                        id = source.id,
+                        "no stored catalog — background re-ingest"
+                    );
+                    win.background_ingest(source.id);
+                }
+            }
+        });
         tracing::info!(
             target: "rtv::store",
             last_source = last,
@@ -1572,12 +1739,16 @@ impl Window {
     }
 
     fn play(&self, kind: Kind, id: i64, name: &str) {
-        // Real playback: the ACTIVE source composes the stream URL from
-        // its credentials (never logged). With no active source or no
-        // URL (still indexing), the demo player stands in.
-        let url = self
-            .active_source_creds()
-            .map(|creds| creds.stream_url(kind, id, "ts"));
+        // Real playback. M3U entries carry their OWN url (per-entry);
+        // Xtream items get one composed from the active source's
+        // credentials (never logged). With neither, the demo player
+        // stands in.
+        let catalog = self.catalog();
+        let item_url = catalog.item(kind, id).and_then(|it| it.url.clone());
+        let url = item_url.or_else(|| {
+            self.active_source_creds()
+                .map(|creds| creds.stream_url(kind, id, "ts"))
+        });
         let status = match (&url, kind) {
             (Some(_), Kind::Live) => "Live · playing from source",
             (Some(_), Kind::Vod) => "Movie · playing from source",
