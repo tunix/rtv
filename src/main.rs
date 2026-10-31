@@ -1,9 +1,12 @@
 mod app;
 mod catalog;
+mod catalogdb;
 mod covers;
 mod details;
 mod ingest;
+mod keyring;
 mod ratings;
+mod store;
 mod ui;
 mod xtream;
 

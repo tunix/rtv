@@ -227,6 +227,9 @@ mod imp {
         /// generation may hide the controls (stale timers must no-op, since
         /// `SourceId::remove` panics on already-fired ids).
         pub controls_generation: Cell<u64>,
+        /// Suppresses the dropdown selection handler while startup
+        /// restores the persisted selection (prevents a double apply).
+        pub restoring_selection: Cell<bool>,
         /// Bumped whenever the position ticker must be cancelled/replaced.
         pub position_generation: Cell<u64>,
         /// Guards the seek-scale sync: true while the ticker writes the
@@ -474,8 +477,10 @@ impl Window {
             .iter()
             .find(|s| s.state == crate::ui::sources::SourceState::Ready)
         {
-            // Only auto-apply when the current snapshot is still empty.
-            if self.catalog().is_empty() {
+            // Only auto-apply when the current snapshot is still empty;
+            // skipped while startup restore is driving the selection
+            // (the restore path applies explicitly).
+            if self.catalog().is_empty() && !self.imp().restoring_selection.get() {
                 self.show_source_snapshot(source.id);
             }
         }
@@ -503,6 +508,7 @@ impl Window {
     pub fn set_category_visible(&self, kind: Kind, category_id: &str, visible: bool) {
         let started = std::time::Instant::now();
         let catalog = (*self.catalog()).clone();
+        let active = self.active_source_id();
         let mut changed = false;
         let mut affected_names: Vec<String> = Vec::new();
         let mut catalog = catalog;
@@ -523,7 +529,10 @@ impl Window {
             visible,
             "category visibility patched into snapshot"
         );
-        self.apply_catalog(catalog);
+        self.apply_catalog(catalog.clone());
+        if active > 0 {
+            crate::store::persist_category_flags(active, &catalog);
+        }
         tracing::info!(
             target: "rtv::ui",
             ms = started.elapsed().as_millis(),
@@ -551,6 +560,115 @@ impl Window {
     /// detail page enumerates categories from it).
     pub fn catalog_rc(&self) -> std::rc::Rc<Catalog> {
         self.catalog()
+    }
+
+    /// Id of the source currently picked in the dropdown (0 = none).
+    pub fn active_source_id(&self) -> u64 {
+        let imp = self.imp();
+        let index = imp
+            .dropdown
+            .borrow()
+            .as_ref()
+            .map(|d| d.selected())
+            .unwrap_or(0);
+        imp.sources_model
+            .all()
+            .get(index as usize)
+            .map(|s| s.id)
+            .unwrap_or(0)
+    }
+
+    /// STARTUP LOADING (the loading policy from AGENTS.md): render from
+    /// the local cache first. Sources come from sources.json + keyring;
+    /// every stored catalog snapshot is published immediately. The
+    /// last-active source is restored into the dropdown. Sources with
+    /// no stored catalog surface the Retry affordance instead of
+    /// silently refetching with possibly-stale credentials.
+    pub fn load_persisted_state(&self) {
+        let (sources, next_id) = crate::store::load_sources();
+        let imp = self.imp();
+        // Whole-loader suppression: any dropdown/sync triggered apply
+        // during restore would duplicate the explicit one below.
+        imp.restoring_selection.set(true);
+        // The snapshot provider is normally installed by the settings
+        // dialog on first open — but the startup loader needs it EARLIER
+        // (show_source_snapshot during restore). Install it here too;
+        // install_snapshot_provider replaces this when the dialog opens.
+        let model = imp.sources_model.clone();
+        self.install_snapshot_provider(move |id| model.get(id).and_then(|s| s.snapshot));
+        for source in &sources {
+            imp.sources_model.reserve_ids_through(source.id);
+        }
+        for source in sources {
+            let id = source.id;
+            let mut source = source;
+            if let Some(catalog) = crate::store::load_catalog(id) {
+                source.state = crate::ui::sources::SourceState::Ready;
+                source.live_cats = catalog
+                    .categories
+                    .iter()
+                    .filter(|c| c.kind == Kind::Live)
+                    .count() as u32;
+                source.live_items = catalog.item_count(Kind::Live) as u32;
+                source.vod_cats = catalog
+                    .categories
+                    .iter()
+                    .filter(|c| c.kind == Kind::Vod)
+                    .count() as u32;
+                source.vod_items = catalog.item_count(Kind::Vod) as u32;
+                source.series_cats = catalog
+                    .categories
+                    .iter()
+                    .filter(|c| c.kind == Kind::Series)
+                    .count() as u32;
+                source.series_items = catalog.item_count(Kind::Series) as u32;
+                source.snapshot = Some(std::rc::Rc::new(catalog));
+            } else {
+                source.state = crate::ui::sources::SourceState::Failed;
+                source.failure = Some("Not loaded yet — press Retry to fetch the catalog.".into());
+            }
+            // The model is empty at startup - append, don't replace
+            // (replace() only updates existing entries; a no-op here
+            // silently dropped every loaded source and left the model
+            // empty, which read back as restored_active=false).
+            imp.sources_model.add(|_| source);
+        }
+        imp.sources_model
+            .reserve_ids_through(next_id.saturating_sub(1));
+        self.sync_sources_ui();
+        self.on_sources_changed();
+
+        // Restore the last active source into the dropdown + snapshot.
+        let last = crate::store::last_source();
+        let mut restored_active = false;
+        if last > 0 {
+            let sources = imp.sources_model.all();
+            if let Some(index) = sources.iter().position(|s| s.id == last) {
+                // The dropdown notify handler applies the snapshot only
+                // when the selection CHANGES; on startup it may equal the
+                // restored index (no change, no notify) or fire alongside
+                // the explicit call below (double apply). The restoring
+                // flag collapses both paths to exactly one apply.
+                if let Some(dropdown) = imp.dropdown.borrow().as_ref() {
+                    dropdown.set_selected(index as u32);
+                }
+                self.show_source_snapshot(last);
+                restored_active = true;
+            }
+        }
+        imp.restoring_selection.set(false);
+        // Cache-first launch: with a usable catalog on board, browsing
+        // unlocks immediately instead of parking on the welcome screen.
+        if restored_active && !self.catalog().is_empty() {
+            imp.has_source.set(true);
+            imp.main_view.push(&*imp.browse_page);
+        }
+        tracing::info!(
+            target: "rtv::store",
+            last_source = last,
+            unlocked_browse = restored_active && !self.catalog().is_empty(),
+            "persisted state loaded"
+        );
     }
 
     /// Called when the settings dialog closes: if the user has at least one
@@ -696,10 +814,14 @@ impl Window {
         let win = self.downgrade();
         dropdown.connect_selected_notify(move |dropdown| {
             let Some(win) = win.upgrade() else { return };
+            if win.imp().restoring_selection.get() {
+                return; // startup restore applies the snapshot itself
+            }
             let index = dropdown.selected();
             let sources = win.imp().sources_model.all();
             let Some(source) = sources.get(index as usize) else { return };
             tracing::info!(target: "rtv::ui", id = source.id, name = %source.name, "source selected in dropdown");
+            crate::store::set_last_source(source.id);
             win.show_source_snapshot(source.id);
         });
 

@@ -149,6 +149,20 @@ pub struct SourcesModel {
 }
 
 impl SourcesModel {
+    /// Current next-id (persisted so ids stay stable across restarts).
+    pub fn peek_next_id(&self) -> u64 {
+        self.next_id.get()
+    }
+
+    /// Raise next_id past `id` (after loading stored sources).
+    pub fn reserve_ids_through(&self, id: u64) {
+        if self.next_id.get() <= id {
+            self.next_id.set(id + 1);
+        }
+    }
+}
+
+impl SourcesModel {
     pub fn all(&self) -> Vec<Source> {
         self.items.borrow().clone()
     }
@@ -517,6 +531,7 @@ impl Ctx {
                     s.series_cats = counts.series_cats;
                     s.series_items = counts.series_items;
                 });
+                crate::store::save_catalog(id, &catalog);
                 if let Some(win) = win_weak.upgrade() {
                     win.apply_catalog(catalog);
                     win.sync_sources_ui();
@@ -568,6 +583,7 @@ impl Ctx {
             if response != "delete" {
                 return;
             }
+            crate::store::delete_source(id);
             ctx.model.remove(id);
             if ctx.detail.open_id.get() == Some(id) {
                 if let Some(nav) = ctx.nav.upgrade() {
@@ -788,6 +804,7 @@ impl Ctx {
                     let mut updated = source.clone();
                     updated.name = name;
                     updated.kind = kind;
+                    crate::store::save_source(&updated);
                     save_ctx.model.replace(updated);
                     save_ctx.toast("Source saved");
                 }
@@ -807,6 +824,8 @@ impl Ctx {
                         section_hidden: [false; 3],
                         snapshot: None,
                     });
+                    let stored = save_ctx.model.get(id).expect("just added");
+                    crate::store::save_source(&stored);
                     save_ctx.toast("Source added — loading…");
                     save_ctx.start_ingest(id);
                 }
@@ -1029,6 +1048,9 @@ impl Ctx {
         };
         let id = source;
         self.model.set_section_visible(id, section, visible);
+        if let Some(stored) = self.model.get(id) {
+            crate::store::save_section_flags(id, stored.section_hidden);
+        }
         if let Some(win) = self.win.upgrade() {
             win.set_section_visible(section.kind(), visible);
         }
