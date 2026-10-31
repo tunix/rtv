@@ -83,7 +83,7 @@ impl SourceKind {
 
     fn icon(&self) -> &'static str {
         match self {
-            Self::Xtream { .. } => "network-wired-symbolic",
+            Self::Xtream { .. } => "tv-symbolic",
             Self::M3U { .. } => "text-x-generic-symbolic",
         }
     }
@@ -964,9 +964,11 @@ impl SettingsUi {
         let toasts = adw::ToastOverlay::new();
         let detail = Rc::new(DetailState::default());
 
-        // Sources pane root: empty state (first run) vs source list.
+        // Sources pane root: empty state (first run) vs source list. The
+        // icon matches the sidebar's Sources tab (tv-symbolic) — one glyph
+        // for the concept, monochrome Adwaita stock.
         let empty = adw::StatusPage::builder()
-            .icon_name("network-wired-symbolic")
+            .icon_name("tv-symbolic")
             .title("No sources yet")
             .description("Add an IPTV source — an Xtream Codes account or an M3U playlist — to start watching.")
             .build();
