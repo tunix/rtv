@@ -140,6 +140,7 @@ jobs:
           dnf install -y clang gcc pkgconf-pkg-config
           gtk4-devel libadwaita-devel libsoup3-devel glib2-devel
           gstreamer1-devel gstreamer1-plugins-base-devel blueprint-compiler git
+          dbus-devel
 
       - name: Install rustup + toolchain
         run: |
