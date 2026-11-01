@@ -878,6 +878,29 @@ impl Ctx {
             if name.is_empty() {
                 return;
             }
+            // Defense in depth: re-validate at save time. The live
+            // handler paints rows red and disables Save, but the click
+            // closure must not trust stale UI state.
+            let is_xtream = kind_toggle.active_name().as_deref() == Some("xtream");
+            if is_xtream {
+                let server_text = server_weak
+                    .upgrade()
+                    .map(|r| r.text().trim().to_string())
+                    .unwrap_or_default();
+                if !matches!(validate_server_input(&server_text), ValidationResult::Valid(_)) {
+                    tracing::warn!(target: "rtv::ui", "save blocked: server URL failed validation");
+                    return;
+                }
+            } else {
+                let url_text = url_weak
+                    .upgrade()
+                    .map(|r| r.text().trim().to_string())
+                    .unwrap_or_default();
+                if !matches!(validate_m3u_input(&url_text), ValidationResult::Valid(_)) {
+                    tracing::warn!(target: "rtv::ui", "save blocked: playlist URL failed validation");
+                    return;
+                }
+            }
             let kind = match kind_toggle.active_name().as_deref() {
                 Some("xtream") => {
                     let (Some(server_row), Some(username_row), Some(password_row)) = (
@@ -1661,4 +1684,35 @@ mod tests {
             "Playlist URL — not a valid playlist URL (expected http(s)://…)"
         );
     }
+
+    #[test]
+    fn save_time_guard_rejects_invalid_urls() {
+        // Mirrors the save handler's guard: xtream uses server validation,
+        // m3u uses playlist validation; a blocked save must leave the
+        // model untouched (the handler returns early before any model
+        // mutation).
+        for input in ["adasdasd", "ftp://x", "http://", "host with space"] {
+            let result = validate_server_input(input);
+            assert!(
+                !matches!(result, ValidationResult::Valid(_)),
+                "xtream save must reject: {input}"
+            );
+        }
+        for input in ["adasdasd", "ftp://x", "http://", "host with space"] {
+            let result = validate_m3u_input(input);
+            assert!(
+                !matches!(result, ValidationResult::Valid(_)),
+                "m3u save must reject: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn save_time_guard_accepts_valid_urls() {
+        let server = validate_server_input("panel.example.com:8080");
+        assert!(matches!(server, ValidationResult::Valid(_)));
+        let m3u = validate_m3u_input("http://example.com/list.m3u");
+        assert!(matches!(m3u, ValidationResult::Valid(_)));
+    }
+
 }
