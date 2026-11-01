@@ -1896,6 +1896,7 @@ impl Window {
         // (older runtimes, headless GL) the audio still plays while the
         // demo surface stays up.
         if let Ok(sink) = gstreamer::ElementFactory::make("gtk4paintablesink").build() {
+            tracing::info!(target: "rtv::play", "video sink: gtk4paintablesink");
             let paintable = sink.property::<Option<gtk::gdk::Paintable>>("paintable");
             if let Some(paintable) = paintable {
                 imp.video_surface.set_paintable(Some(&paintable));
@@ -1904,16 +1905,35 @@ impl Window {
             }
         }
         if !video {
+            tracing::warn!(
+                target: "rtv::play",
+                "gtk4paintablesink unavailable — falling back to fakesink (audio only)"
+            );
             if let Ok(fake) = gstreamer::ElementFactory::make("fakesink").build() {
                 playbin.set_property("video-sink", &fake);
             }
+        }
+        // The panel origin filters User-Agents (AGENTS.md): playbin's
+        // default soup source presents a generic UA and gets the stream
+        // killed (HTTP 520). Swap in our own souphttpsrc with the app UA
+        // BEFORE the URI is set so the source picks it up.
+        if let Ok(src) = gstreamer::ElementFactory::make("souphttpsrc").build() {
+            src.set_property("user-agent", crate::xtream::USER_AGENT);
+            playbin.set_property("source", &src);
         }
         playbin.set_property("uri", uri);
         playbin.set_property("volume", imp.volume_scale.value());
         playbin.set_property("mute", imp.muted.get());
 
-        let playing = playbin.set_state(gstreamer::State::Playing).is_ok();
-        if !playing {
+        let state_result = playbin.set_state(gstreamer::State::Playing);
+        if let Err(err) = &state_result {
+            tracing::error!(
+                target: "rtv::play",
+                error = %err,
+                "playbin failed to reach PLAYING"
+            );
+        }
+        if state_result.is_err() {
             let _ = playbin.set_state(gstreamer::State::Null);
             return false;
         }
@@ -1958,7 +1978,16 @@ impl Window {
                             }
                         }
                         gstreamer::MessageView::Error(err) => {
-                            let _ = err;
+                            // Log the REAL cause (decoder name, URI, error
+                            // string) — the toast is generic but the log
+                            // tells us exactly which element failed.
+                            tracing::error!(
+                                target: "rtv::play",
+                                source = err.src().map(|s| s.name().to_string()).unwrap_or("?".into()),
+                                error = %err.error(),
+                                debug = %err.debug().unwrap_or_default(),
+                                "playback pipeline error"
+                            );
                             if missing_codec || retried.get() {
                                 win.toast(
                                     "Missing codec for this stream — install GStreamer decoders (e.g. RPM Fusion gstreamer1-libav)",
@@ -2233,7 +2262,8 @@ impl Window {
 
         let win = self.downgrade();
         let seasons_box = seasons_box.clone();
-        details::series_info(id, move |result| {
+        let source_id = self.active_source_id();
+        details::series_info(source_id, id, move |result| {
             let Some(win) = win.upgrade() else {
                 return;
             };
@@ -2483,7 +2513,8 @@ impl Window {
         let title = name.to_string();
         let trailer_section = trailer_section.clone();
         let backdrop = backdrop.clone();
-        details::vod_info(id, move |result| {
+        let source_id = self.active_source_id();
+        details::vod_info(source_id, id, move |result| {
             let Some(win) = win.upgrade() else {
                 return;
             };
