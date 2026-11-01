@@ -111,6 +111,25 @@ pub fn parse_server(server: &str) -> Option<String> {
     if rest.starts_with(':') || rest.ends_with(':') {
         return None;
     }
+    // Host plausibility: a bare word with no dot and no port ("adasdasd")
+    // is not a usable panel address. Accept dotted names, :port forms,
+    // IPv4 literals, bracketed IPv6, and localhost.
+    let host_port = rest.split('/').next().unwrap_or(rest);
+    let host = host_port.rsplit_once(':').map_or(host_port, |(h, _)| h);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.is_empty()
+        || host.contains(char::is_whitespace)
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        return None;
+    }
+    let has_dot = host.contains('.');
+    let has_port = host_port.contains(':');
+    if !has_dot && !has_port && host != "localhost" {
+        return None;
+    }
     Some(format!("{scheme}://{rest}"))
 }
 
@@ -510,6 +529,25 @@ mod tests {
         assert_eq!(parse_server("ftp://host"), None);
         assert_eq!(parse_server("http://host with space"), None);
         assert_eq!(parse_server("http://"), None);
+        // Bare words the user might type are not hostnames.
+        assert_eq!(parse_server("adasdasd"), None);
+        assert_eq!(parse_server("http://adasdasd"), None);
+        assert_eq!(
+            parse_server("adasdasd:8080"),
+            Some("http://adasdasd:8080".into())
+        );
+        assert_eq!(
+            parse_server("localhost:8080"),
+            Some("http://localhost:8080".into())
+        );
+        assert_eq!(
+            parse_server("192.168.1.10"),
+            Some("http://192.168.1.10".into())
+        );
+        assert_eq!(
+            parse_server("my_panel.example.com"),
+            Some("http://my_panel.example.com".into())
+        );
     }
 
     // ---- parse_category_list ----
