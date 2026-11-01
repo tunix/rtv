@@ -130,3 +130,96 @@ impl Catalog {
         self.items.iter().find(|it| it.kind == kind && it.id == id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cat(kind: Kind, id: &str, name: &str, visible: bool) -> Category {
+        Category {
+            kind,
+            id: id.into(),
+            name: name.into(),
+            visible,
+        }
+    }
+
+    fn item(kind: Kind, id: i64, cat: &str) -> Item {
+        Item {
+            kind,
+            id,
+            category_id: cat.into(),
+            name: format!("item {id}"),
+            icon: None,
+            rating: None,
+            url: None,
+        }
+    }
+
+    fn sample() -> Catalog {
+        Catalog {
+            categories: vec![
+                cat(Kind::Live, "L1", "Live", true),
+                cat(Kind::Live, "L2", "Hidden Live", false),
+                cat(Kind::Vod, "V1", "Movies", true),
+            ],
+            items: vec![
+                item(Kind::Live, 1, "L1"),
+                item(Kind::Live, 2, "L1"),
+                item(Kind::Live, 3, "L2"),
+                item(Kind::Vod, 10, "V1"),
+            ],
+            series_meta: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn item_count_filters_by_kind() {
+        let c = sample();
+        assert_eq!(c.item_count(Kind::Live), 3);
+        assert_eq!(c.item_count(Kind::Vod), 1);
+        assert_eq!(c.item_count(Kind::Series), 0);
+    }
+
+    #[test]
+    fn is_empty_reflects_both_collections() {
+        assert!(Catalog::default().is_empty());
+        let mut c = Catalog::default();
+        c.categories.push(cat(Kind::Live, "x", "x", true));
+        assert!(!c.is_empty());
+        c.categories.clear();
+        c.items.push(item(Kind::Live, 1, "x"));
+        assert!(!c.is_empty());
+    }
+
+    #[test]
+    fn indices_for_honors_visibility() {
+        let c = sample();
+        assert_eq!(c.indices_for(Kind::Live, "L1", ""), vec![0, 1]);
+        // Hidden category yields nothing even though items exist.
+        assert_eq!(c.indices_for(Kind::Live, "L2", ""), Vec::<usize>::new());
+        // Unknown category yields nothing.
+        assert_eq!(c.indices_for(Kind::Live, "GHOST", ""), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn indices_for_applies_query_case_insensitively() {
+        let mut c = sample();
+        c.items[0].name = "Fox News HD".into();
+        c.items[1].name = "CNN".into();
+        assert_eq!(c.indices_for(Kind::Live, "L1", "fox"), vec![0]);
+        assert_eq!(c.indices_for(Kind::Live, "L1", "FOX NEWS"), vec![0]);
+        assert_eq!(c.indices_for(Kind::Live, "L1", "news hd"), vec![0]);
+        assert_eq!(c.indices_for(Kind::Live, "L1", "cnn"), vec![1]);
+        assert_eq!(c.indices_for(Kind::Live, "L1", "zzz"), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn item_lookup_is_kind_scoped() {
+        let c = sample();
+        assert_eq!(c.item(Kind::Live, 1).map(|i| i.id), Some(1));
+        // Same numeric id in another kind is NOT returned.
+        assert!(c.item(Kind::Vod, 1).is_none());
+        assert_eq!(c.item(Kind::Vod, 10).map(|i| i.id), Some(10));
+    }
+}

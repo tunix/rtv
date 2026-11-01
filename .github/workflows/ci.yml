@@ -176,18 +176,18 @@ jobs:
 
       # Gate: coverage must stay at or above MIN_COVERAGE. Raise the bar as
       # coverage grows, never lower it — except when new untested code is
-      # INTENTIONALLY added and covered by follow-ups (e2e ingestion
-      # round added ~950 lines of real-network logic; measured locally at
-      # 8.9% — the gate was lowered once, 12.0 -> 8.0. The follow-up
-      # round (details-from-active-source, M3U per-entry playback,
-      # background re-ingest) measured 7.9% — lowered to match. The
-      # detail-cache + diagnostics round added another ~240 lines,
-      # measured 7.7% — lowered to match again. Ratchet stays: raise
-      # the bar as unit tests land, never lower otherwise.
+      # RATCHET (user decision): the gate rises as coverage grows and
+      # never lowers. History: 12.9% baseline -> 12.0 -> dropped to 7.7
+      # as ~2.2k lines of network/SQLite/GUI code landed faster than
+      # tests (documented rounds: ingestion 8.9%, persistence+follow-ups
+      # 7.9%, detail-cache 7.7%). The unit-test round (parse/assembly/
+      # catalog/db/store helpers) lifted coverage to 21.8% — the gate
+      # now sits at 21.0%. Raise it as more tests land; NEVER lower it
+      # for new untested code again — write the tests in the same PR.
       - name: Extract coverage total
         id: cov
         env:
-          MIN_COVERAGE: "7.7"
+          MIN_COVERAGE: "21.0"
         run: |
           set -eu
           read HIT FOUND <<<"$(awk '

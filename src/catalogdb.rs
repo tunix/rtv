@@ -316,3 +316,173 @@ fn write_info_json(path: &Path, table: &str, id_col: &str, id: i64, value: &Valu
 pub fn exists(path: &Path) -> bool {
     path.exists()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tmp_path(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "rtv-test-{tag}-{}-{}",
+            std::process::id(),
+            fastrand_id()
+        ));
+        dir.join("catalog.db")
+    }
+
+    /// Cheap unique suffix without extra deps.
+    fn fastrand_id() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
+            .unwrap_or(0)
+    }
+
+    fn sample() -> Catalog {
+        Catalog {
+            categories: vec![
+                Category {
+                    kind: Kind::Live,
+                    id: "L1".into(),
+                    name: "Live".into(),
+                    visible: true,
+                },
+                Category {
+                    kind: Kind::Vod,
+                    id: "V1".into(),
+                    name: "Movies".into(),
+                    visible: true,
+                },
+            ],
+            items: vec![Item {
+                kind: Kind::Live,
+                id: 1,
+                category_id: "L1".into(),
+                name: "Chan".into(),
+                icon: Some("http://i".into()),
+                rating: None,
+                url: Some("http://s/1".into()),
+            }],
+            series_meta: std::collections::HashMap::from([(
+                7i64,
+                SeriesMeta {
+                    plot: Some("p".into()),
+                    ..Default::default()
+                },
+            )]),
+        }
+    }
+
+    #[test]
+    fn write_then_read_roundtrips() {
+        let path = tmp_path("roundtrip");
+        write(&path, &sample()).expect("write");
+        let back = read(&path).expect("read");
+        assert_eq!(back.categories.len(), 2);
+        assert_eq!(back.items.len(), 1);
+        assert_eq!(back.items[0].name, "Chan");
+        assert_eq!(back.items[0].url.as_deref(), Some("http://s/1"));
+        assert_eq!(back.series_meta[&7].plot.as_deref(), Some("p"));
+        // Categories keep visibility.
+        assert!(back.categories.iter().all(|c| c.visible));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn write_is_atomic_and_idempotent() {
+        let path = tmp_path("atomic");
+        write(&path, &sample()).unwrap();
+        let first = std::fs::read(&path).unwrap();
+        // Second write must succeed and leave no tmp residue.
+        write(&path, &sample()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), first);
+        assert!(!path.with_extension("db.tmp").exists());
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn update_visibility_patches_in_place_and_keeps_other_rows() {
+        let path = tmp_path("visibility");
+        write(&path, &sample()).unwrap();
+
+        let mut patched = sample();
+        for c in &mut patched.categories {
+            if c.id == "L1" {
+                c.visible = false;
+            }
+        }
+        update_visibility(&path, &patched.categories).expect("update");
+
+        let back = read(&path).expect("read");
+        let l1 = back.categories.iter().find(|c| c.id == "L1").unwrap();
+        let v1 = back.categories.iter().find(|c| c.id == "V1").unwrap();
+        assert!(!l1.visible);
+        assert!(v1.visible);
+        // Items untouched.
+        assert_eq!(back.items.len(), 1);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn update_visibility_noops_on_unknown_ids() {
+        let path = tmp_path("unknownvis");
+        write(&path, &sample()).unwrap();
+        let unknown = vec![Category {
+            kind: Kind::Live,
+            id: "GHOST".into(),
+            name: "g".into(),
+            visible: false,
+        }];
+        update_visibility(&path, &unknown).expect("update");
+        let back = read(&path).expect("read");
+        assert_eq!(back.categories.len(), 2);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn detail_cache_roundtrips_per_id() {
+        let path = tmp_path("details");
+        write(&path, &sample()).unwrap();
+
+        let series = json!({"seasons": [{"season_number": 1}], "episodes": {"1": []}});
+        write_series_info(&path, 7701, &series);
+        write_series_info(&path, 7702, &json!({"seasons": []}));
+
+        assert_eq!(
+            read_series_info(&path, 7701).unwrap(),
+            json!({"seasons": [{"season_number": 1}], "episodes": {"1": []}})
+        );
+        assert!(read_series_info(&path, 7702).is_some());
+        // Miss: never stored id.
+        assert!(read_series_info(&path, 9999).is_none());
+
+        // Upsert overwrites.
+        write_series_info(&path, 7701, &json!({"seasons": [], "episodes": {}}));
+        assert_eq!(
+            read_series_info(&path, 7701).unwrap(),
+            json!({"seasons": [], "episodes": {}})
+        );
+
+        // VOD path separate from series.
+        write_vod_info(&path, 500, &json!({"info": {"plot": "x"}}));
+        assert_eq!(
+            read_vod_info(&path, 500).unwrap(),
+            json!({"info": {"plot": "x"}})
+        );
+        assert!(read_series_info(&path, 500).is_none());
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn read_errors_on_missing_file_and_detail_cache_misses() {
+        let path = tmp_path("missing");
+        // read() errors on a missing file; store::load_catalog wraps
+        // that into None so the caller sees "no stored catalog".
+        assert!(read(&path).is_err());
+        assert!(read_series_info(&path, 1).is_none());
+        assert!(read_vod_info(&path, 1).is_none());
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+}
