@@ -1908,6 +1908,14 @@ impl Window {
                 playbin.set_property("video-sink", &fake);
             }
         }
+        // The panel origin filters User-Agents (AGENTS.md): playbin's
+        // default soup source presents a generic UA and gets the stream
+        // killed (HTTP 520). Swap in our own souphttpsrc with the app UA
+        // BEFORE the URI is set so the source picks it up.
+        if let Ok(src) = gstreamer::ElementFactory::make("souphttpsrc").build() {
+            src.set_property("user-agent", crate::xtream::USER_AGENT);
+            playbin.set_property("source", &src);
+        }
         playbin.set_property("uri", uri);
         playbin.set_property("volume", imp.volume_scale.value());
         playbin.set_property("mute", imp.muted.get());
@@ -2233,7 +2241,8 @@ impl Window {
 
         let win = self.downgrade();
         let seasons_box = seasons_box.clone();
-        details::series_info(id, move |result| {
+        let source_id = self.active_source_id();
+        details::series_info(source_id, id, move |result| {
             let Some(win) = win.upgrade() else {
                 return;
             };
@@ -2483,7 +2492,8 @@ impl Window {
         let title = name.to_string();
         let trailer_section = trailer_section.clone();
         let backdrop = backdrop.clone();
-        details::vod_info(id, move |result| {
+        let source_id = self.active_source_id();
+        details::vod_info(source_id, id, move |result| {
             let Some(win) = win.upgrade() else {
                 return;
             };
