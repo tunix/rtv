@@ -1714,5 +1714,4 @@ mod tests {
         let m3u = validate_m3u_input("http://example.com/list.m3u");
         assert!(matches!(m3u, ValidationResult::Valid(_)));
     }
-
 }

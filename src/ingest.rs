@@ -532,10 +532,22 @@ mod tests {
         // Bare words the user might type are not hostnames.
         assert_eq!(parse_server("adasdasd"), None);
         assert_eq!(parse_server("http://adasdasd"), None);
-        assert_eq!(parse_server("adasdasd:8080"), Some("http://adasdasd:8080".into()));
-        assert_eq!(parse_server("localhost:8080"), Some("http://localhost:8080".into()));
-        assert_eq!(parse_server("192.168.1.10"), Some("http://192.168.1.10".into()));
-        assert_eq!(parse_server("my_panel.example.com"), Some("http://my_panel.example.com".into()));
+        assert_eq!(
+            parse_server("adasdasd:8080"),
+            Some("http://adasdasd:8080".into())
+        );
+        assert_eq!(
+            parse_server("localhost:8080"),
+            Some("http://localhost:8080".into())
+        );
+        assert_eq!(
+            parse_server("192.168.1.10"),
+            Some("http://192.168.1.10".into())
+        );
+        assert_eq!(
+            parse_server("my_panel.example.com"),
+            Some("http://my_panel.example.com".into())
+        );
     }
 
     // ---- parse_category_list ----
