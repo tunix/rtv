@@ -226,3 +226,48 @@ pub fn parse_m3u(text: &str) -> Vec<M3UEntry> {
     tracing::info!(target: "rtv::m3u", count = out.len(), "playlist parsed");
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_m3u_extracts_names_groups_and_urls() {
+        let text = concat!(
+            "#EXTM3U\n",
+            "#EXTINF:-1 tvg-id=\"1\" group-title=\"Sports\",Match A\n",
+            "http://s/1\n",
+            "#EXTINF:-1 group-title=\"News\",Daily\n",
+            "http://s/2\n"
+        );
+        let entries = parse_m3u(text);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "Match A");
+        assert_eq!(entries[0].group, "Sports");
+        assert_eq!(entries[0].url, "http://s/1");
+        assert_eq!(entries[1].group, "News");
+    }
+
+    #[test]
+    fn parse_m3u_skips_orphan_urls_without_extinf() {
+        let text = "#EXTINF:-1 group-title=\"A\",X\nhttp://x\nhttp://orphan\n";
+        let entries = parse_m3u(text);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "X");
+    }
+
+    #[test]
+    fn parse_m3u_handles_empty_and_header_only() {
+        assert!(parse_m3u("").is_empty());
+        assert!(parse_m3u("#EXTM3U\n").is_empty());
+    }
+
+    #[test]
+    fn parse_m3u_missing_group_becomes_empty_string() {
+        let text = "#EXTINF:-1,No Group\nhttp://n\n";
+        let entries = parse_m3u(text);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].group, "");
+        // The ingest layer folds these into DEFAULT_GROUP; parse keeps raw.
+    }
+}
