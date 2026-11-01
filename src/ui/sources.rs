@@ -1610,7 +1610,11 @@ mod tests {
 
     #[test]
     fn row_validation_applies_and_clears_error_state() {
-        // Widget feedback needs GTK; skip quietly on display-less hosts.
+        // Widget feedback needs a live display; on headless CI runners
+        // gtk::init segfaults instead of erroring, so bail before init.
+        if std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err() {
+            return;
+        }
         if gtk::init().is_err() {
             return;
         }
@@ -1638,6 +1642,9 @@ mod tests {
 
     #[test]
     fn row_validation_message_includes_reason() {
+        if std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err() {
+            return;
+        }
         if gtk::init().is_err() {
             return;
         }
