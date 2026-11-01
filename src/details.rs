@@ -7,7 +7,7 @@
 //! provider closure): the values are NEVER logged, printed or persisted —
 //! only placed into the request URL in memory.
 
-use std::{cell::RefCell, collections::HashMap};
+use std::{cell::RefCell, collections::HashMap, time::Duration};
 
 use gtk::glib;
 use serde_json::Value;
@@ -94,47 +94,81 @@ pub struct VodInfo {
 /// Fetch series info (seasons + episodes) asynchronously; `done` runs on
 /// the main loop with `None` on any failure. Results are cached in memory.
 /// Queries the ACTIVE source's panel.
-pub fn series_info(series_id: i64, done: impl FnOnce(Option<SeriesInfo>) + 'static) {
+pub fn series_info(
+    source_id: u64,
+    series_id: i64,
+    done: impl FnOnce(Option<SeriesInfo>) + 'static,
+) {
     if let Some(cached) = SERIES_CACHE.with(|c| c.borrow().get(&series_id).cloned()) {
         done(Some(cached));
         return;
     }
-    let url = api_url(&format!("action=get_series_info&series_id={series_id}"));
-    if let Some(url) = url {
-        get_json(&url, move |value| {
-            let result = value.as_ref().and_then(parse_series_info);
-            if let Some(info) = &result {
-                SERIES_CACHE.with(|c| c.borrow_mut().insert(series_id, info.clone()));
-            }
-            done(result);
-        });
-    } else {
+    // Disk cache first (per-source DB): instant, and immune to a panel
+    // that answers badly for this title right now.
+    if let Some(cached) = crate::store::catalog_db_path(source_id)
+        .and_then(|path| crate::catalogdb::read_series_info(&path, series_id))
+        .and_then(|v| parse_series_info(&v))
+    {
+        SERIES_CACHE.with(|c| c.borrow_mut().insert(series_id, cached.clone()));
+        done(Some(cached));
+        return;
+    }
+    let Some(url) = api_url(&format!("action=get_series_info&series_id={series_id}")) else {
         // No active Xtream source (M3U has no details API).
         done(None);
-    }
+        return;
+    };
+    fetch_with_retry(
+        url,
+        "series_info",
+        parse_series_info,
+        move |result, raw| {
+            if let Some(info) = &result {
+                SERIES_CACHE.with(|c| c.borrow_mut().insert(series_id, info.clone()));
+                // Persist raw JSON for the next launch (instant open).
+                if let (Some(path), Some(v)) = (crate::store::catalog_db_path(source_id), raw) {
+                    crate::catalogdb::write_series_info(&path, series_id, &v);
+                }
+            }
+        },
+        done,
+    );
 }
 
 /// Fetch VOD info (plot/genre/cast/...) asynchronously; `done` runs on the
 /// main loop with `None` on any failure. Results are cached in memory.
 /// Queries the ACTIVE source's panel.
-pub fn vod_info(vod_id: i64, done: impl FnOnce(Option<VodInfo>) + 'static) {
+pub fn vod_info(source_id: u64, vod_id: i64, done: impl FnOnce(Option<VodInfo>) + 'static) {
     if let Some(cached) = VOD_CACHE.with(|c| c.borrow().get(&vod_id).cloned()) {
         done(Some(cached));
         return;
     }
-    let url = api_url(&format!("action=get_vod_info&vod_id={vod_id}"));
-    if let Some(url) = url {
-        get_json(&url, move |value| {
-            let result = value.as_ref().and_then(parse_vod_info);
+    if let Some(cached) = crate::store::catalog_db_path(source_id)
+        .and_then(|path| crate::catalogdb::read_vod_info(&path, vod_id))
+        .and_then(|v| parse_vod_info(&v))
+    {
+        VOD_CACHE.with(|c| c.borrow_mut().insert(vod_id, cached.clone()));
+        done(Some(cached));
+        return;
+    }
+    let Some(url) = api_url(&format!("action=get_vod_info&vod_id={vod_id}")) else {
+        done(None);
+        return;
+    };
+    fetch_with_retry(
+        url,
+        "vod_info",
+        parse_vod_info,
+        move |result, raw| {
             if let Some(info) = &result {
                 VOD_CACHE.with(|c| c.borrow_mut().insert(vod_id, info.clone()));
+                if let (Some(path), Some(v)) = (crate::store::catalog_db_path(source_id), raw) {
+                    crate::catalogdb::write_vod_info(&path, vod_id, &v);
+                }
             }
-            done(result);
-        });
-    } else {
-        // No active Xtream source (M3U has no details API).
-        done(None);
-    }
+        },
+        done,
+    );
 }
 
 /// GET a JSON document; `done` receives the parsed value or `None` on any
@@ -164,6 +198,49 @@ fn get_json(url: &str, done: impl FnOnce(Option<Value>) + 'static) {
                 done(value);
             },
         );
+    });
+}
+
+/// GET a JSON document with ONE automatic retry after a short backoff
+/// when the panel answers badly (transport failure, HTTP error, body
+/// that fails `parse`). `on_parsed` receives the parsed value (plus the
+/// raw body for persistence) on SUCCESS only — failures never reach it.
+/// A parse that yields None is retried once: panels hiccup, and this is
+/// the "çıkıp girince düzeliyor" case made automatic.
+fn fetch_with_retry<T: Clone + 'static>(
+    url: String,
+    tag: &'static str,
+    parse: fn(&Value) -> Option<T>,
+    on_parsed: impl FnOnce(Option<T>, Option<Value>) + 'static,
+    done: impl FnOnce(Option<T>) + 'static,
+) {
+    let url2 = url.clone();
+    get_json(&url, move |value| {
+        let parsed = value.as_ref().and_then(parse);
+        match parsed {
+            Some(parsed) => {
+                on_parsed(Some(parsed.clone()), value);
+                done(Some(parsed));
+            }
+            None => {
+                tracing::warn!(
+                    target: "rtv::fetch",
+                    tag,
+                    attempt = 1,
+                    "detail fetch failed — retrying once"
+                );
+                glib::timeout_add_local_once(Duration::from_millis(600), move || {
+                    get_json(&url2, move |value2| {
+                        let parsed2 = value2.as_ref().and_then(parse);
+                        if parsed2.is_none() {
+                            tracing::warn!(target: "rtv::fetch", tag, attempt = 2, "detail fetch failed twice");
+                        }
+                        on_parsed(parsed2.clone(), value2);
+                        done(parsed2);
+                    });
+                });
+            }
+        }
     });
 }
 

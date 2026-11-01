@@ -300,6 +300,12 @@ pub fn save_section_flags(id: u64, hidden: [bool; 3]) {
     }
 }
 
+/// The per-source catalog DB path, for callers outside this module
+/// (details.rs detail cache). None for id 0.
+pub fn catalog_db_path(source_id: u64) -> Option<std::path::PathBuf> {
+    (source_id > 0).then(|| catalog_db(source_id))
+}
+
 /// Save a full catalog snapshot for one source (post-ingest).
 pub fn save_catalog(id: u64, catalog: &Catalog) {
     let started = std::time::Instant::now();

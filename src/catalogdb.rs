@@ -9,6 +9,8 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
+use serde_json::Value;
+
 use crate::catalog::{Catalog, Category, Item, Kind, SeriesMeta};
 
 const SCHEMA: &str = "
@@ -43,6 +45,16 @@ CREATE TABLE IF NOT EXISTS series_meta (
     episode_run_time TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_items_cat ON items (kind, category_id);
+CREATE TABLE IF NOT EXISTS series_info (
+    series_id  INTEGER PRIMARY KEY,
+    json       TEXT NOT NULL,
+    fetched_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS vod_info (
+    vod_id     INTEGER PRIMARY KEY,
+    json       TEXT NOT NULL,
+    fetched_at INTEGER NOT NULL
+);
 ";
 
 fn kind_id(kind: Kind) -> i64 {
@@ -210,6 +222,94 @@ pub fn update_visibility(
     drop(stmt);
     tx.commit()?;
     Ok(())
+}
+
+/// Detail-page cache: read a previously stored get_series_info JSON.
+/// Returns None when absent (never fetched for this source).
+pub fn read_series_info(path: &Path, series_id: i64) -> Option<Value> {
+    read_info_json(path, "series_info", "series_id", series_id)
+}
+
+/// Store a get_series_info response (raw JSON, so schema changes in the
+/// parser never invalidate stored rows).
+pub fn write_series_info(path: &Path, series_id: i64, value: &Value) {
+    write_info_json(
+        path,
+        "series_info",
+        "series_id",
+        series_id,
+        value,
+        "series detail cache",
+    )
+}
+
+pub fn read_vod_info(path: &Path, vod_id: i64) -> Option<Value> {
+    read_info_json(path, "vod_info", "vod_id", vod_id)
+}
+
+pub fn write_vod_info(path: &Path, vod_id: i64, value: &Value) {
+    write_info_json(
+        path,
+        "vod_info",
+        "vod_id",
+        vod_id,
+        value,
+        "vod detail cache",
+    )
+}
+
+fn read_info_json(path: &Path, table: &str, id_col: &str, id: i64) -> Option<Value> {
+    let started = std::time::Instant::now();
+    let conn = Connection::open(path).ok()?;
+    let json: String = conn
+        .query_row(
+            &format!("SELECT json FROM {table} WHERE {id_col} = ?1"),
+            [id],
+            |row| row.get(0),
+        )
+        .ok()?;
+    let value: Value = serde_json::from_str(&json).ok()?;
+    tracing::info!(
+        target: "rtv::store",
+        ms = started.elapsed().as_millis(),
+        table,
+        id,
+        "detail cache HIT"
+    );
+    Some(value)
+}
+
+fn write_info_json(path: &Path, table: &str, id_col: &str, id: i64, value: &Value, label: &str) {
+    let started = std::time::Instant::now();
+    let Ok(conn) = Connection::open(path) else {
+        return;
+    };
+    let _ = conn.execute_batch(SCHEMA);
+    let json = serde_json::to_string(value).expect("Value serializes");
+    let now = glib::DateTime::now_utc()
+        .map(|dt| dt.to_unix())
+        .unwrap_or(0);
+    let result = conn.execute(
+        &format!(
+            "INSERT INTO {table} ({id_col}, json, fetched_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT({id_col}) DO UPDATE SET json = ?2, fetched_at = ?3"
+        ),
+        rusqlite::params![id, json, now],
+    );
+    match result {
+        Ok(_) => tracing::info!(
+            target: "rtv::store",
+            ms = started.elapsed().as_millis(),
+            table,
+            id,
+            "{label} persisted"
+        ),
+        Err(err) => tracing::warn!(
+            target: "rtv::store",
+            error = %err,
+            "{label} persist failed (memory cache still covers this run)"
+        ),
+    }
 }
 
 /// Whether a usable catalog file exists for a source.
