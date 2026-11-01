@@ -1896,6 +1896,7 @@ impl Window {
         // (older runtimes, headless GL) the audio still plays while the
         // demo surface stays up.
         if let Ok(sink) = gstreamer::ElementFactory::make("gtk4paintablesink").build() {
+            tracing::info!(target: "rtv::play", "video sink: gtk4paintablesink");
             let paintable = sink.property::<Option<gtk::gdk::Paintable>>("paintable");
             if let Some(paintable) = paintable {
                 imp.video_surface.set_paintable(Some(&paintable));
@@ -1904,6 +1905,10 @@ impl Window {
             }
         }
         if !video {
+            tracing::warn!(
+                target: "rtv::play",
+                "gtk4paintablesink unavailable — falling back to fakesink (audio only)"
+            );
             if let Ok(fake) = gstreamer::ElementFactory::make("fakesink").build() {
                 playbin.set_property("video-sink", &fake);
             }
@@ -1920,8 +1925,15 @@ impl Window {
         playbin.set_property("volume", imp.volume_scale.value());
         playbin.set_property("mute", imp.muted.get());
 
-        let playing = playbin.set_state(gstreamer::State::Playing).is_ok();
-        if !playing {
+        let state_result = playbin.set_state(gstreamer::State::Playing);
+        if let Err(err) = &state_result {
+            tracing::error!(
+                target: "rtv::play",
+                error = %err,
+                "playbin failed to reach PLAYING"
+            );
+        }
+        if state_result.is_err() {
             let _ = playbin.set_state(gstreamer::State::Null);
             return false;
         }
@@ -1966,7 +1978,16 @@ impl Window {
                             }
                         }
                         gstreamer::MessageView::Error(err) => {
-                            let _ = err;
+                            // Log the REAL cause (decoder name, URI, error
+                            // string) — the toast is generic but the log
+                            // tells us exactly which element failed.
+                            tracing::error!(
+                                target: "rtv::play",
+                                source = err.src().map(|s| s.name().to_string()).unwrap_or("?".into()),
+                                error = %err.error(),
+                                debug = %err.debug().unwrap_or_default(),
+                                "playback pipeline error"
+                            );
                             if missing_codec || retried.get() {
                                 win.toast(
                                     "Missing codec for this stream — install GStreamer decoders (e.g. RPM Fusion gstreamer1-libav)",
