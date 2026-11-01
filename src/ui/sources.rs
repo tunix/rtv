@@ -230,6 +230,67 @@ impl Section {
 }
 
 /// Whether one of the form's entry rows holds non-blank text. Generic over
+/// A non-empty, non-invalid URL check for form validation. Empty means
+/// "nothing typed yet" (no error shown); `parse_server`/`http` check
+/// decides validity once the user types. `epg` fields are optional.
+fn validate_server_input(text: &str) -> ValidationResult {
+    if text.trim().is_empty() {
+        return ValidationResult::Empty;
+    }
+    match crate::ingest::parse_server(text) {
+        Some(url) => ValidationResult::Valid(url),
+        None => ValidationResult::Invalid,
+    }
+}
+
+fn validate_m3u_input(text: &str) -> ValidationResult {
+    if text.trim().is_empty() {
+        return ValidationResult::Empty;
+    }
+    let trimmed = text.trim();
+    let looks_http = trimmed.starts_with("http://") || trimmed.starts_with("https://");
+    let has_host = trimmed
+        .split_once("://")
+        .map(|(_, rest)| !rest.is_empty() && !rest.contains(char::is_whitespace))
+        .unwrap_or(false);
+    if looks_http && has_host {
+        ValidationResult::Valid(trimmed.to_string())
+    } else {
+        ValidationResult::Invalid
+    }
+}
+
+/// Outcome of validating one URL-ish form field.
+#[derive(Debug)]
+enum ValidationResult {
+    /// Nothing typed (no error shown, Save gated by `filled`).
+    Empty,
+    /// Usable; carries the normalized form (read by tests).
+    Valid(#[allow(dead_code)] String),
+    /// Typed but not usable (row goes red with a message).
+    Invalid,
+}
+
+/// Apply Adwaita's error affordance to an EntryRow: red text + a message
+/// line. Clearing restores the plain title.
+fn apply_row_validation(
+    row: &adw::EntryRow,
+    original_title: &str,
+    result: &ValidationResult,
+    message: &str,
+) {
+    match result {
+        ValidationResult::Invalid => {
+            row.add_css_class("error");
+            row.set_title(&format!("{original_title} — {message}"));
+        }
+        _ => {
+            row.remove_css_class("error");
+            row.set_title(original_title);
+        }
+    }
+}
+
 /// EntryRow/PasswordEntryRow (both extend GtkEditable).
 fn filled<T: glib::object::IsA<gtk::Editable>>(row: &glib::WeakRef<T>) -> bool {
     row.upgrade()
@@ -714,7 +775,51 @@ impl Ctx {
                 let (Some(save), Some(kind)) = (save_weak.upgrade(), kind_weak.upgrade()) else {
                     return;
                 };
+                let is_xtream = kind.active_name().as_deref() == Some("xtream");
                 let name_ok = filled(&name_weak);
+
+                // Live validation of the visible URL fields. Empty is
+                // gated by `filled` (no red while typing has not started);
+                // a typed-but-unusable value blocks Save and paints the
+                // row red with a reason.
+                let (server_result, url_result);
+                if is_xtream {
+                    server_result = validate_server_input(
+                        &server_weak
+                            .upgrade()
+                            .map(|r| r.text().to_string())
+                            .unwrap_or_default(),
+                    );
+                    apply_row_validation(
+                        &server_weak.upgrade().unwrap(),
+                        "Server URL",
+                        &server_result,
+                        "not a valid server address (expected http(s)://host[:port])",
+                    );
+                } else {
+                    server_result = ValidationResult::Empty;
+                }
+                if !is_xtream {
+                    url_result = validate_m3u_input(
+                        &url_weak
+                            .upgrade()
+                            .map(|r| r.text().to_string())
+                            .unwrap_or_default(),
+                    );
+                    apply_row_validation(
+                        &url_weak.upgrade().unwrap(),
+                        "Playlist URL",
+                        &url_result,
+                        "not a valid playlist URL (expected http(s)://…)",
+                    );
+                } else {
+                    url_result = ValidationResult::Empty;
+                }
+
+                let urls_ok = !matches!(
+                    (&server_result, &url_result),
+                    (ValidationResult::Invalid, _) | (_, ValidationResult::Invalid)
+                );
                 let kind_ok = match kind.active_name().as_deref() {
                     Some("xtream") => {
                         filled(&server_weak) && filled(&username_weak) && filled(&password_weak)
@@ -722,7 +827,7 @@ impl Ctx {
                     Some("m3u") => filled(&url_weak),
                     _ => false,
                 };
-                save.set_sensitive(name_ok && kind_ok);
+                save.set_sensitive(name_ok && kind_ok && urls_ok);
             }
         };
         for row in [&name_row, &server_row, &username_row, &url_row] {
@@ -1413,5 +1518,140 @@ mod tests {
         source.state = SourceState::Failed;
         source.failure = Some("boom".into());
         assert!(source_subtitle(&source).contains("Failed — boom"));
+    }
+
+    // ---- URL field validation ----
+
+    #[test]
+    fn server_validation_empty_is_not_invalid() {
+        assert!(matches!(validate_server_input(""), ValidationResult::Empty));
+        assert!(matches!(
+            validate_server_input("   "),
+            ValidationResult::Empty
+        ));
+    }
+
+    #[test]
+    fn server_validation_accepts_normal_forms() {
+        for input in [
+            "http://panel.example.com:8080",
+            "https://panel.example.com",
+            "panel.example.com:8080",
+            "  http://panel.example.com  ",
+            "panel.example.com",
+        ] {
+            assert!(
+                matches!(validate_server_input(input), ValidationResult::Valid(_)),
+                "should be valid: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn server_validation_rejects_unusable_values() {
+        for input in [
+            "ftp://panel",
+            "http://", // scheme only
+            "http://host with space",
+            "host with space", // no scheme, whitespace
+            "http:",           // scheme-only residue
+        ] {
+            assert!(
+                matches!(validate_server_input(input), ValidationResult::Invalid),
+                "should be invalid: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn server_validation_normalizes_via_parse_server() {
+        match validate_server_input("panel.example.com:8080") {
+            ValidationResult::Valid(url) => {
+                assert_eq!(url, "http://panel.example.com:8080");
+            }
+            other => panic!("expected Valid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn m3u_validation_empty_is_not_invalid() {
+        assert!(matches!(validate_m3u_input(""), ValidationResult::Empty));
+        assert!(matches!(validate_m3u_input("  "), ValidationResult::Empty));
+    }
+
+    #[test]
+    fn m3u_validation_accepts_http_and_https_only() {
+        for input in [
+            "http://example.com/list.m3u",
+            "https://example.com/list.m3u?token=x",
+            " http://example.com/a.m3u ",
+        ] {
+            assert!(
+                matches!(validate_m3u_input(input), ValidationResult::Valid(_)),
+                "should be valid: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn m3u_validation_rejects_non_http_and_hostless() {
+        for input in [
+            "ftp://example.com/list.m3u", // wrong scheme
+            "example.com/list.m3u",       // no scheme
+            "http://",                    // scheme only
+            "https://host with space/a",  // whitespace in host
+        ] {
+            assert!(
+                matches!(validate_m3u_input(input), ValidationResult::Invalid),
+                "should be invalid: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn row_validation_applies_and_clears_error_state() {
+        // Widget feedback needs GTK; skip quietly on display-less hosts.
+        if gtk::init().is_err() {
+            return;
+        }
+        let row = adw::EntryRow::builder().title("Server URL").build();
+        let invalid = ValidationResult::Invalid;
+        apply_row_validation(&row, "Server URL", &invalid, "not a valid server address");
+        assert!(row.has_css_class("error"));
+        assert!(row.title().contains("not a valid server address"));
+
+        // A valid/empty result restores the plain title.
+        apply_row_validation(
+            &row,
+            "Server URL",
+            &ValidationResult::Empty,
+            "not a valid server address",
+        );
+        assert!(!row.has_css_class("error"));
+        assert_eq!(row.title(), "Server URL");
+
+        let valid = ValidationResult::Valid("http://x".into());
+        apply_row_validation(&row, "Server URL", &valid, "not a valid server address");
+        assert!(!row.has_css_class("error"));
+        assert_eq!(row.title(), "Server URL");
+    }
+
+    #[test]
+    fn row_validation_message_includes_reason() {
+        if gtk::init().is_err() {
+            return;
+        }
+        let row = adw::EntryRow::builder().title("Playlist URL").build();
+        let invalid = ValidationResult::Invalid;
+        apply_row_validation(
+            &row,
+            "Playlist URL",
+            &invalid,
+            "not a valid playlist URL (expected http(s)://…)",
+        );
+        assert_eq!(
+            row.title(),
+            "Playlist URL — not a valid playlist URL (expected http(s)://…)"
+        );
     }
 }

@@ -89,8 +89,10 @@ pub fn start(
     }
 }
 
-/// Normalize what the user typed into `scheme://host:port`.
-pub(crate) fn parse_server(server: &str) -> Option<String> {
+/// Normalize what the user typed into `scheme://host:port`. Shared by
+/// the form's live validation and the ingest itself; `None` means the
+/// input is not a usable server address (invalid scheme, no host).
+pub fn parse_server(server: &str) -> Option<String> {
     let server = server.trim().trim_end_matches('/');
     if server.is_empty() {
         return None;
