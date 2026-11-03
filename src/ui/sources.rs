@@ -764,6 +764,17 @@ impl Ctx {
             .css_classes(["suggested-action"])
             .build();
         let save_weak = save.downgrade();
+        // Touched flags: a URL field shows its error state only after
+        // the user has edited it and left the field (validate-on-blur).
+        // While typing the feedback is silent (Save just stays
+        // disabled); leaving the field with an invalid value paints it
+        // red with the reason immediately — no need to press Save.
+        let server_touched = std::rc::Rc::new(std::cell::Cell::new(false));
+        let url_touched = std::rc::Rc::new(std::cell::Cell::new(false));
+        let server_touched_for_toggle = server_touched.clone();
+        let url_touched_for_toggle = url_touched.clone();
+        let server_touched_in_update = server_touched.clone();
+        let url_touched_in_update = url_touched.clone();
         let update_save = {
             let name_weak = name_row.downgrade();
             let server_weak = server_row.downgrade();
@@ -771,6 +782,8 @@ impl Ctx {
             let password_weak = password_row.downgrade();
             let url_weak = url_row.downgrade();
             let kind_weak = kind_toggle.downgrade();
+            let server_touched = server_touched_in_update;
+            let url_touched = url_touched_in_update;
             move || {
                 let (Some(save), Some(kind)) = (save_weak.upgrade(), kind_weak.upgrade()) else {
                     return;
@@ -778,10 +791,6 @@ impl Ctx {
                 let is_xtream = kind.active_name().as_deref() == Some("xtream");
                 let name_ok = filled(&name_weak);
 
-                // Live validation of the visible URL fields. Empty is
-                // gated by `filled` (no red while typing has not started);
-                // a typed-but-unusable value blocks Save and paints the
-                // row red with a reason.
                 let (server_result, url_result);
                 if is_xtream {
                     server_result = validate_server_input(
@@ -790,14 +799,19 @@ impl Ctx {
                             .map(|r| r.text().to_string())
                             .unwrap_or_default(),
                     );
-                    apply_row_validation(
-                        &server_weak.upgrade().unwrap(),
-                        "Server URL",
-                        &server_result,
-                        "not a valid server address (expected http(s)://host[:port])",
-                    );
+                    if server_touched.get() {
+                        apply_row_validation(
+                            &server_weak.upgrade().unwrap(),
+                            "Server URL",
+                            &server_result,
+                            "not a valid server address (expected http(s)://host[:port])",
+                        );
+                    }
                 } else {
                     server_result = ValidationResult::Empty;
+                    if let Some(row) = server_weak.upgrade() {
+                        apply_row_validation(&row, "Server URL", &server_result, "");
+                    }
                 }
                 if !is_xtream {
                     url_result = validate_m3u_input(
@@ -806,14 +820,19 @@ impl Ctx {
                             .map(|r| r.text().to_string())
                             .unwrap_or_default(),
                     );
-                    apply_row_validation(
-                        &url_weak.upgrade().unwrap(),
-                        "Playlist URL",
-                        &url_result,
-                        "not a valid playlist URL (expected http(s)://…)",
-                    );
+                    if url_touched.get() {
+                        apply_row_validation(
+                            &url_weak.upgrade().unwrap(),
+                            "Playlist URL",
+                            &url_result,
+                            "not a valid playlist URL (expected http(s)://…)",
+                        );
+                    }
                 } else {
                     url_result = ValidationResult::Empty;
+                    if let Some(row) = url_weak.upgrade() {
+                        apply_row_validation(&row, "Playlist URL", &url_result, "");
+                    }
                 }
 
                 let urls_ok = !matches!(
@@ -838,8 +857,27 @@ impl Ctx {
             let update = update_save.clone();
             password_row.connect_changed(move |_| update());
         }
+        // Validate-on-blur: leaving the field marks it touched and runs
+        // a pass, so an invalid value turns red the moment focus moves
+        // away — before any Save attempt. EntryRow exposes focus events
+        // through an EventControllerFocus.
+        for (row, touched) in [(&server_row, &server_touched), (&url_row, &url_touched)] {
+            let controller = gtk::EventControllerFocus::new();
+            let update = update_save.clone();
+            let touched = touched.clone();
+            controller.connect_leave(move |_| {
+                touched.set(true);
+                update();
+            });
+            row.add_controller(controller);
+        }
+        // Switching the kind toggle resets blur state and re-runs.
         let update_on_toggle = update_save.clone();
-        kind_toggle.connect_active_name_notify(move |_| update_on_toggle());
+        kind_toggle.connect_active_name_notify(move |_| {
+            server_touched_for_toggle.set(false);
+            url_touched_for_toggle.set(false);
+            update_on_toggle();
+        });
         update_save();
 
         // No manual back button here: adw::NavigationView automatically adds
@@ -877,6 +915,29 @@ impl Ctx {
             let name = name_row.text().trim().to_string();
             if name.is_empty() {
                 return;
+            }
+            // Defense in depth: re-validate at save time. The live
+            // handler paints rows red and disables Save, but the click
+            // closure must not trust stale UI state.
+            let is_xtream = kind_toggle.active_name().as_deref() == Some("xtream");
+            if is_xtream {
+                let server_text = server_weak
+                    .upgrade()
+                    .map(|r| r.text().trim().to_string())
+                    .unwrap_or_default();
+                if !matches!(validate_server_input(&server_text), ValidationResult::Valid(_)) {
+                    tracing::warn!(target: "rtv::ui", "save blocked: server URL failed validation");
+                    return;
+                }
+            } else {
+                let url_text = url_weak
+                    .upgrade()
+                    .map(|r| r.text().trim().to_string())
+                    .unwrap_or_default();
+                if !matches!(validate_m3u_input(&url_text), ValidationResult::Valid(_)) {
+                    tracing::warn!(target: "rtv::ui", "save blocked: playlist URL failed validation");
+                    return;
+                }
             }
             let kind = match kind_toggle.active_name().as_deref() {
                 Some("xtream") => {
@@ -1660,5 +1721,35 @@ mod tests {
             row.title(),
             "Playlist URL — not a valid playlist URL (expected http(s)://…)"
         );
+    }
+
+    #[test]
+    fn save_time_guard_rejects_invalid_urls() {
+        // Mirrors the save handler's guard: xtream uses server validation,
+        // m3u uses playlist validation; a blocked save must leave the
+        // model untouched (the handler returns early before any model
+        // mutation).
+        for input in ["adasdasd", "ftp://x", "http://", "host with space"] {
+            let result = validate_server_input(input);
+            assert!(
+                !matches!(result, ValidationResult::Valid(_)),
+                "xtream save must reject: {input}"
+            );
+        }
+        for input in ["adasdasd", "ftp://x", "http://", "host with space"] {
+            let result = validate_m3u_input(input);
+            assert!(
+                !matches!(result, ValidationResult::Valid(_)),
+                "m3u save must reject: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn save_time_guard_accepts_valid_urls() {
+        let server = validate_server_input("panel.example.com:8080");
+        assert!(matches!(server, ValidationResult::Valid(_)));
+        let m3u = validate_m3u_input("http://example.com/list.m3u");
+        assert!(matches!(m3u, ValidationResult::Valid(_)));
     }
 }
