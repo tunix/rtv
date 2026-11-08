@@ -54,6 +54,8 @@ pub struct Item {
     pub id: i64,
     pub category_id: String,
     pub name: String,
+    /// Release year when the panel's name carries one (see `split_title`).
+    pub year: Option<String>,
     pub icon: Option<String>,
     /// Textual rating when the panel carries one ("0" = none).
     pub rating: Option<String>,
@@ -61,6 +63,142 @@ pub struct Item {
     /// Xtream items leave it None — their URLs are composed from the
     /// source's credentials. NEVER logged.
     pub url: Option<String>,
+}
+
+impl Item {
+    /// Listing label: name plus the year in parentheses — the panel's
+    /// score never renders here.
+    pub fn display_name(&self) -> String {
+        match &self.year {
+            Some(y) if !y.trim().is_empty() => format!("{} ({y})", self.name),
+            _ => self.name.clone(),
+        }
+    }
+
+    /// The rating as a number, for sorting and the min-rating filter.
+    pub fn rating_value(&self) -> Option<f32> {
+        self.rating.as_deref().and_then(parse_rating)
+    }
+}
+
+/// Parse a panel rating like "6.5" (0.0..=10.0, one decimal).
+fn parse_rating(text: &str) -> Option<f32> {
+    let value: f32 = text.trim().parse().ok()?;
+    (0.0..=10.0).contains(&value).then_some(value)
+}
+
+fn is_year(text: &str) -> bool {
+    text.len() == 4 && text.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Panels embed the year and the score in the item name
+/// ("Son Damla | 2025 | 6.5"). Split a trailing
+/// "| <year> [| <rating>]" segment off: the pieces feed the year-aware
+/// listing label, the rating chip and the clean-title lookups. Only a
+/// trailing segment in exactly that shape is parsed — anything else
+/// stays verbatim (live channel names, "Movie (2026)" etc.).
+pub fn split_title(raw: &str) -> (String, Option<String>, Option<String>) {
+    let raw = raw.trim();
+    let parts: Vec<&str> = raw.split('|').collect();
+    let mut name_parts: &[&str] = &parts;
+    let mut year = None;
+    let mut rating = None;
+    if parts.len() >= 2 {
+        let last = parts[parts.len() - 1].trim();
+        let before = parts[parts.len() - 2].trim();
+        if parts.len() >= 3 && is_year(before) && parse_rating(last).is_some() {
+            rating = Some(last.to_string());
+            year = Some(before.to_string());
+            name_parts = &parts[..parts.len() - 2];
+        } else if is_year(last) {
+            year = Some(last.to_string());
+            name_parts = &parts[..parts.len() - 1];
+        }
+    }
+    let name = name_parts.join("|").trim().to_string();
+    (name, year, rating)
+}
+
+/// Grid view ordering for the Series/Movies toolbars. `Panel` is the
+/// catalog (source) order the sidebar's counts and search are built on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Sort {
+    #[default]
+    Panel,
+    NameAZ,
+    YearNewest,
+    RatingHighest,
+}
+
+/// One grid "view": a min-rating filter, a genre filter and a sort
+/// order. Filters drop items (items without a rating never pass a
+/// min-rating filter); sorting keeps panel order as the tiebreaker so
+/// the result is stable.
+pub struct GridView<'a> {
+    pub items: &'a [Item],
+    pub series_meta: &'a HashMap<i64, SeriesMeta>,
+    pub min_rating: Option<f32>,
+    pub genre: Option<String>,
+    pub sort: Sort,
+}
+
+impl GridView<'_> {
+    /// Sort + filter a list of catalog indices; the panel order is the
+    /// fallback everywhere (missing years/ratings sort last, ties keep
+    /// the source order).
+    pub fn apply(&self, indices: Vec<usize>) -> Vec<usize> {
+        let genre = self.genre.as_ref().map(|g| g.to_lowercase());
+        let mut out: Vec<usize> = indices
+            .into_iter()
+            .filter(|&i| match (self.min_rating, self.items.get(i)) {
+                (Some(min), Some(it)) => it.rating_value().is_some_and(|r| r >= min),
+                (Some(_), None) => false,
+                _ => true,
+            })
+            .filter(|&i| {
+                let Some(genre) = &genre else {
+                    return true;
+                };
+                self.items
+                    .get(i)
+                    .and_then(|it| self.series_meta.get(&it.id))
+                    .and_then(|m| m.genre.as_deref())
+                    .is_some_and(|g| {
+                        g.split(',')
+                            .any(|part| part.trim().to_lowercase() == genre.as_str())
+                    })
+            })
+            .collect();
+        match self.sort {
+            Sort::Panel => {}
+            Sort::NameAZ => {
+                out.sort_by(|a, b| {
+                    let (x, y) = (self.items.get(*a), self.items.get(*b));
+                    x.map(|i| i.name.to_lowercase())
+                        .cmp(&y.map(|i| i.name.to_lowercase()))
+                        .then(a.cmp(b))
+                });
+            }
+            Sort::YearNewest => {
+                out.sort_by(|a, b| {
+                    let year = |i: usize| {
+                        self.items
+                            .get(i)
+                            .and_then(|it| it.year.as_deref())
+                            .and_then(|y| y.parse::<i32>().ok())
+                    };
+                    year(*b).cmp(&year(*a)).then(a.cmp(b))
+                });
+            }
+            Sort::RatingHighest => {
+                out.sort_by(|a, b| {
+                    let rating = |i: usize| self.items.get(i).and_then(Item::rating_value);
+                    rating(*b).total_cmp(&rating(*a)).then(a.cmp(b))
+                });
+            }
+        }
+        out
+    }
 }
 
 /// Offline series metadata — the series detail page renders it on top
@@ -150,10 +288,140 @@ mod tests {
             id,
             category_id: cat.into(),
             name: format!("item {id}"),
+            year: None,
             icon: None,
             rating: None,
             url: None,
         }
+    }
+
+    #[test]
+    fn split_title_peels_year_and_rating() {
+        assert_eq!(
+            split_title("Son Damla | 2025 | 6.5"),
+            ("Son Damla".into(), Some("2025".into()), Some("6.5".into()))
+        );
+        // Year without a rating segment.
+        assert_eq!(
+            split_title("GTA VI | 2026"),
+            ("GTA VI".into(), Some("2026".into()), None)
+        );
+        // No year/rating segment stays verbatim.
+        assert_eq!(split_title("Fox News"), ("Fox News".into(), None, None));
+        assert_eq!(split_title("beIN | HD"), ("beIN | HD".into(), None, None));
+        // A rating-only tail is never peeled without a year.
+        assert_eq!(
+            split_title("Movie | 6.5"),
+            ("Movie | 6.5".into(), None, None)
+        );
+        // Year-only sanity: not a year, not peeled.
+        assert_eq!(split_title("Movie | 26"), ("Movie | 26".into(), None, None));
+        // Whitespace and stray pipes inside the name survive.
+        assert_eq!(
+            split_title("  Movie: Part | 2 | 2024 | 7.0 "),
+            (
+                "Movie: Part | 2".into(),
+                Some("2024".into()),
+                Some("7.0".into())
+            )
+        );
+    }
+
+    #[test]
+    fn display_name_carries_year_without_rating() {
+        let mut it = item(Kind::Vod, 1, "V");
+        it.name = "Son Damla".into();
+        it.year = Some("2025".into());
+        it.rating = Some("6.5".into());
+        assert_eq!(it.display_name(), "Son Damla (2025)");
+        it.year = None;
+        assert_eq!(it.display_name(), "Son Damla");
+    }
+
+    #[test]
+    fn rating_value_rejects_out_of_range_and_garbage() {
+        let mut it = item(Kind::Vod, 1, "V");
+        it.rating = Some("7.4".into());
+        assert_eq!(it.rating_value(), Some(7.4));
+        it.rating = Some("11".into());
+        assert_eq!(it.rating_value(), None);
+        it.rating = Some("none".into());
+        assert_eq!(it.rating_value(), None);
+        it.rating = None;
+        assert_eq!(it.rating_value(), None);
+    }
+
+    #[test]
+    fn grid_view_sorts_and_filters() {
+        let mut c = sample();
+        // Movie 10: no year/rating; add two rated, one rated movie.
+        c.items[3].name = "C Movie".into();
+        c.items[3].year = Some("2020".into());
+        c.items[3].rating = Some("6.0".into());
+        c.items.push(item(Kind::Vod, 11, "V1"));
+        c.items[4].name = "A Movie".into();
+        c.items[4].year = Some("2024".into());
+        c.items[4].rating = Some("8.0".into());
+        c.items.push(item(Kind::Vod, 12, "V1"));
+        c.items[5].name = "B Movie".into();
+        c.items[5].year = Some("2022".into());
+        c.items[5].rating = Some("5.0".into());
+
+        let base = vec![3usize, 4, 5];
+        let view = |min_rating, genre, sort| GridView {
+            items: &c.items,
+            series_meta: &c.series_meta,
+            min_rating,
+            genre,
+            sort,
+        };
+
+        assert_eq!(
+            view(None, None, Sort::NameAZ).apply(base.clone()),
+            vec![4, 5, 3]
+        );
+        assert_eq!(
+            view(None, None, Sort::YearNewest).apply(base.clone()),
+            vec![4, 5, 3]
+        );
+        assert_eq!(
+            view(None, None, Sort::RatingHighest).apply(base.clone()),
+            vec![4, 5, 3]
+        );
+        assert_eq!(
+            view(None, None, Sort::Panel).apply(base.clone()),
+            vec![3, 4, 5]
+        );
+        // Min-rating drops the unrated item too.
+        assert_eq!(
+            view(Some(5.5), None, Sort::Panel).apply(base.clone()),
+            vec![3, 4]
+        );
+        assert_eq!(
+            view(Some(7.0), None, Sort::Panel).apply(base.clone()),
+            vec![4]
+        );
+        // Genre filter: only items with a matching genre pass.
+        c.series_meta.insert(
+            11,
+            SeriesMeta {
+                genre: Some("Drama, Thriller".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            view(None, Some("drama".into()), Sort::Panel).apply(base.clone()),
+            vec![4]
+        );
+        assert_eq!(
+            view(None, Some("Comedy".into()), Sort::Panel).apply(base.clone()),
+            Vec::<usize>::new()
+        );
+        // Combined filter + sort.
+        assert_eq!(
+            view(Some(5.5), Some("Thriller".into()), Sort::NameAZ).apply(base),
+            vec![4]
+        );
     }
 
     fn sample() -> Catalog {

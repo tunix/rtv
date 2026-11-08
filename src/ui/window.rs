@@ -164,6 +164,12 @@ mod imp {
         #[template_child]
         pub content_grid: TemplateChild<gtk::FlowBox>,
         #[template_child]
+        pub grid_toolbar: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub sort_dropdown: TemplateChild<gtk::DropDown>,
+        #[template_child]
+        pub filter_button: TemplateChild<gtk::MenuButton>,
+        #[template_child]
         pub favorites_box: TemplateChild<gtk::Box>,
         #[template_child]
         pub search_grid: TemplateChild<gtk::FlowBox>,
@@ -202,6 +208,22 @@ mod imp {
         /// means the demo player is on screen.
         pub pipeline: RefCell<Option<gstreamer::Element>>,
         pub selected_category: Cell<i32>,
+        /// Grid view state for the Series/Movies toolbars: the sort
+        /// order, the min-rating filter (0.0 = off) and the genre
+        /// filter (None = off). Re-applied on every category selection.
+        pub grid_sort: Cell<crate::catalog::Sort>,
+        pub min_rating: Cell<f32>,
+        pub genre: RefCell<Option<String>>,
+        /// Guards the toolbar handlers while select_category resyncs the
+        /// genre model (the programmatic selection changes must not
+        /// re-trigger a re-render).
+        pub applying_view: Cell<bool>,
+        /// The genre DropDown's selection model, rebuilt per category
+        /// (genres come from the snapshot's series metadata).
+        pub genre_model: RefCell<Option<gtk::SingleSelection>>,
+        /// The filter popover and its genre row (the row's visibility
+        /// follows the active content kind — series only).
+        pub filter_popover: RefCell<Option<(gtk::Popover, gtk::Box)>>,
         pub last_pointer: Cell<(f64, f64)>,
         pub favorites: RefCell<Vec<FavKey>>,
         /// What the player page is showing, so the heart button can
@@ -1112,6 +1134,9 @@ impl Window {
                 win.route_card(child);
             }
         });
+
+        // Sort + filter toolbar for the Series/Movies grids.
+        self.setup_grid_toolbar();
         let win = self.downgrade();
         imp.search_grid.connect_child_activated(move |_, child| {
             if let Some(win) = win.upgrade() {
@@ -1588,6 +1613,7 @@ impl Window {
         }
         let catalog = self.catalog();
         let Some(cat) = catalog.categories.get(category_index) else {
+            imp.grid_toolbar.set_visible(false);
             return;
         };
         if !cat.visible {
@@ -1596,8 +1622,16 @@ impl Window {
             // hidden category's content.
             tracing::info!(target: "rtv::ui", category = %cat.name, "hidden category activation ignored");
             imp.content_stack.set_visible_child_name("empty");
+            imp.grid_toolbar.set_visible(false);
             return;
         }
+
+        // The toolbar only applies to Series/Movies; Live TV has neither
+        // a year nor a rating to sort or filter on.
+        imp.grid_toolbar.set_visible(cat.kind != Kind::Live);
+        self.sync_genre_model(&catalog, cat);
+        imp.applying_view.set(false);
+
         let q = imp.query.borrow().trim().to_lowercase();
         let indices: Vec<usize> = catalog
             .items
@@ -1610,8 +1644,186 @@ impl Window {
             })
             .map(|(i, _)| i)
             .collect();
+        // The user's sort + filter view rides on top of the panel order.
+        let view = crate::catalog::GridView {
+            items: &catalog.items,
+            series_meta: &catalog.series_meta,
+            min_rating: {
+                let min = imp.min_rating.get();
+                (min > 0.0).then_some(min)
+            },
+            genre: imp.genre.borrow().clone(),
+            sort: imp.grid_sort.get(),
+        };
+        let indices = view.apply(indices);
         imp.content_stack.set_visible_child_name("grid");
         self.fill_grid(indices, &imp.content_grid, false);
+    }
+
+    /// Rebuild the filter popover's genre DropDown model from the
+    /// current category's series metadata ("All genres" first). Movies
+    /// carry no genre in the catalog, so the row hides there. The
+    /// programmatic selection changes run under `applying_view` — the
+    /// handlers must not re-render.
+    fn sync_genre_model(&self, catalog: &Catalog, cat: &Category) {
+        let imp = self.imp();
+        imp.applying_view.set(true);
+
+        let genres: Vec<String> = {
+            let mut seen: Vec<String> = catalog
+                .items
+                .iter()
+                .filter(|it| it.kind == cat.kind && it.category_id == cat.id)
+                .filter_map(|it| catalog.series_meta.get(&it.id))
+                .filter_map(|meta| meta.genre.as_deref())
+                .flat_map(|g| g.split(','))
+                .map(|g| g.trim().to_string())
+                .filter(|g| !g.is_empty())
+                .collect();
+            seen.sort_by_key(|g| g.to_lowercase());
+            seen.dedup();
+            seen
+        };
+
+        // The genre row only shows for series; movies have no genre
+        // data without per-item network fetches.
+        let genre_row = imp
+            .filter_popover
+            .borrow()
+            .as_ref()
+            .map(|p| p.1.clone());
+        if let Some(row) = genre_row {
+            row.set_visible(cat.kind == Kind::Series);
+        }
+
+        let current = imp.genre.borrow().clone();
+        let Some(model) = imp.genre_model.borrow().as_ref() else {
+            return;
+        };
+        let new_list = gtk::StringList::new(
+            &["All genres"]
+                .into_iter()
+                .chain(genres.iter().map(|g| g.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        model.set_selected(0); // reset BEFORE the swap (GTK emits no notify on a same-index set)
+        model.set_model(Some(&new_list));
+        // Keep the active genre selection when the new category still
+        // carries it; otherwise the filter resets to "All genres".
+        if let Some(genre) = &current {
+            let found = genres
+                .iter()
+                .position(|g| g.eq_ignore_ascii_case(genre))
+                .map(|p| p as u32 + 1);
+            if let Some(index) = found {
+                model.set_selected(index);
+            } else {
+                *imp.genre.borrow_mut() = None;
+            }
+        }
+    }
+
+    /// Wire the grid toolbar: the sort DropDown, the min-rating and
+    /// genre DropDowns inside the filter popover. Every change re-runs
+    /// select_category on the active category with the new view state.
+    fn setup_grid_toolbar(&self) {
+        let imp = self.imp();
+
+        imp.sort_dropdown.set_model(Some(&gtk::SingleSelection::new(
+            Some(gtk::StringList::new(&[
+                "Source order",
+                "Name (A\u{2013}Z)",
+                "Year (newest)",
+                "Rating (highest)",
+            ])),
+        )));
+        let win = self.downgrade();
+        imp.sort_dropdown.connect_selected_notify(move |_| {
+            let Some(win) = win.upgrade() else { return };
+            let sort = [
+                crate::catalog::Sort::Panel,
+                crate::catalog::Sort::NameAZ,
+                crate::catalog::Sort::YearNewest,
+                crate::catalog::Sort::RatingHighest,
+            ][win.imp().sort_dropdown.selected() as usize];
+            win.imp().grid_sort.set(sort);
+            if win.imp().selected_category.get() >= 0 {
+                let selected = win.imp().selected_category.get() as usize;
+                win.select_category(selected);
+            }
+        });
+
+        // Filter popover: min rating + genre rows, both plain DropDowns.
+        let popover = gtk::Popover::new();
+        let content = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .margin_top(12)
+            .margin_bottom(12)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+
+        content.append(&gtk::Label::builder()
+            .label("Minimum rating")
+            .halign(gtk::Align::Start)
+            .build());
+        let rating_list = gtk::StringList::new(&["Any", "5.0+", "6.0+", "7.0+", "8.0+"]);
+        let rating_model = gtk::SingleSelection::new(Some(rating_list));
+        let rating_dd = gtk::DropDown::new(Some(rating_model), None::<gtk::Expression>);
+        content.append(&rating_dd);
+
+        content.append(&gtk::Label::builder()
+            .label("Genre")
+            .halign(gtk::Align::Start)
+            .build());
+        let genre_model = gtk::SingleSelection::new(Some(gtk::StringList::new(&["All genres"])));
+        let genre_dd = gtk::DropDown::new(Some(genre_model.clone()), None::<gtk::Expression>);
+        let genre_row = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).build();
+        genre_row.append(&genre_dd);
+        content.append(&genre_row);
+
+        popover.set_child(Some(&content));
+        imp.filter_button.set_popover(Some(&popover));
+        *imp.filter_popover.borrow_mut() = Some((popover, genre_row));
+        *imp.genre_model.borrow_mut() = Some(genre_model);
+
+        let win = self.downgrade();
+        rating_dd.connect_selected_notify(move |_| {
+            let Some(win) = win.upgrade() else { return };
+            if win.imp().applying_view.get() {
+                return;
+            }
+            let min = [0.0, 5.0, 6.0, 7.0, 8.0][rating_dd.selected() as usize];
+            win.imp().min_rating.set(min);
+            if win.imp().selected_category.get() >= 0 {
+                let selected = win.imp().selected_category.get() as usize;
+                win.select_category(selected);
+            }
+        });
+        let win = self.downgrade();
+        genre_dd.connect_selected_notify(move |_| {
+            let Some(win) = win.upgrade() else { return };
+            if win.imp().applying_view.get() {
+                return;
+            }
+            let genre = if genre_dd.selected() > 0 {
+                win.imp()
+                    .genre_model
+                    .borrow()
+                    .as_ref()
+                    .and_then(|m| m.selected_item())
+                    .and_then(|o| o.downcast::<gtk::StringObject>().ok())
+                    .map(|o| o.string().to_string())
+            } else {
+                None
+            };
+            *win.imp().genre.borrow_mut() = genre;
+            if win.imp().selected_category.get() >= 0 {
+                let selected = win.imp().selected_category.get() as usize;
+                win.select_category(selected);
+            }
+        });
     }
 
     /// Fill a grid progressively: FILL_CHUNK cards per idle tick so a
@@ -1766,7 +1978,7 @@ impl Window {
             for fav in section {
                 // Items are looked up by kind + id; the name is only for
                 // display, so a stale favorite still routes correctly.
-                let icon = imp
+                let found = imp
                     .catalog
                     .borrow()
                     .as_ref()
@@ -1775,9 +1987,11 @@ impl Window {
                             .iter()
                             .find(|it| it.kind == fav.kind && it.id == fav.id)
                     })
-                    .and_then(|it| it.icon.clone());
+                    .map(|it| (it.display_name(), it.icon.clone()));
+                let (name, icon) = found
+                    .unwrap_or_else(|| (fav.name.clone(), None));
                 grid.append(&card_body(
-                    &fav.name,
+                    &name,
                     icon.as_deref(),
                     Some(fav.kind),
                     Some(fav.id),
@@ -1803,7 +2017,11 @@ impl Window {
         }
         // Fallback: cards without kind data resolve by their title.
         if let Some(name) = card_name(child) {
-            if let Some(item) = catalog.items.iter().find(|it| it.name == name) {
+            if let Some(item) = catalog
+                .items
+                .iter()
+                .find(|it| it.display_name() == name)
+            {
                 match item.kind {
                     Kind::Live => self.play(item.kind, item.id, &item.name),
                     Kind::Series | Kind::Vod => self.open_details(item.kind, item.id, &item.name),
@@ -2271,6 +2489,7 @@ impl Window {
                 id,
                 name,
                 item.rating.clone(),
+                item.year.clone(),
                 item.icon.as_deref(),
                 generation,
             ),
@@ -2300,12 +2519,12 @@ impl Window {
         imp.detail_content.append(&header);
 
         // Rating-source chips sit right below the künye (cover + metadata
-        // block). The IMDb score arrives from the live ratings lookup;
-        // until then the chip shows a small placeholder.
+        // block). The score comes from the panel when it carries one —
+        // no internet lookup then — and from the live ratings lookup
+        // (clean title + year) otherwise.
         let (chips_row, chips) = source_chips_row(name);
         imp.detail_content.append(&chips_row);
 
-        let win = self.downgrade();
         let panel_rating = meta.rating.clone().filter(|r| r != "0");
         let year = meta
             .release_date
@@ -2320,20 +2539,26 @@ impl Window {
         if let Some(section) = &trailer_section {
             imp.detail_content.append(&section.widget);
         }
-        crate::ratings::lookup(Kind::Series, name, year.as_deref(), move |ratings| {
-            let Some(win) = win.upgrade() else {
-                return;
-            };
-            if win.imp().details_generation.get() != generation {
-                return;
-            }
-            chips.apply(ratings.as_ref(), panel_rating.as_deref());
-            if let Some(ratings) = &ratings {
-                if let Some(section) = &trailer_section {
-                    section.apply_artwork(ratings.backdrop.as_deref());
+        if let Some(panel) = panel_rating.as_deref() {
+            // The panel carries its own score — never re-fetch it.
+            chips.apply(None, Some(panel));
+        } else {
+            let win = self.downgrade();
+            crate::ratings::lookup(Kind::Series, name, year.as_deref(), move |ratings| {
+                let Some(win) = win.upgrade() else {
+                    return;
+                };
+                if win.imp().details_generation.get() != generation {
+                    return;
                 }
-            }
-        });
+                chips.apply(ratings.as_ref(), None);
+                if let Some(ratings) = &ratings {
+                    if let Some(section) = &trailer_section {
+                        section.apply_artwork(ratings.backdrop.as_deref());
+                    }
+                }
+            });
+        }
 
         imp.detail_content.append(&section_title("Seasons"));
         let seasons_box = gtk::Box::builder()
@@ -2536,6 +2761,7 @@ impl Window {
         id: i64,
         name: &str,
         panel_rating: Option<String>,
+        year: Option<String>,
         cover: Option<&str>,
         generation: u64,
     ) {
@@ -2544,36 +2770,43 @@ impl Window {
         imp.detail_content.append(&header);
         info_col.append(&spinner());
 
-        // Rating-source chips sit right below the künye, above Play; the
-        // ratings lookup refines the IMDb link and score in place, with
-        // the panel's rating as the offline fallback. The trailers section
-        // arrives with the async vod info, so the section and the looked
-        // up backdrop are shared through slots to connect them.
+        // Rating-source chips sit right below the künye, above Play. The
+        // panel's own score wins when it carries one — no internet lookup
+        // then — otherwise the live ratings lookup (clean title + year)
+        // refines the score and the exact IMDb link in place. The
+        // trailers section arrives with the async vod info, so the
+        // section and the looked up backdrop are shared through slots to
+        // connect them.
         let (chips_row, chips) = source_chips_row(name);
         imp.detail_content.append(&chips_row);
         let trailer_section: Rc<RefCell<Option<TrailerSection>>> = Rc::new(RefCell::new(None));
         let backdrop: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
-        let win = self.downgrade();
         let panel_rating = panel_rating.filter(|r| r != "0");
-        crate::ratings::lookup(Kind::Vod, name, None, {
-            let trailer_section = trailer_section.clone();
-            let backdrop = backdrop.clone();
-            move |ratings| {
-                let Some(win) = win.upgrade() else {
-                    return;
-                };
-                if win.imp().details_generation.get() != generation {
-                    return;
-                }
-                chips.apply(ratings.as_ref(), panel_rating.as_deref());
-                if let Some(ratings) = &ratings {
-                    *backdrop.borrow_mut() = ratings.backdrop.clone();
-                    if let Some(section) = &*trailer_section.borrow() {
-                        section.apply_artwork(ratings.backdrop.as_deref());
+        if let Some(panel) = panel_rating.as_deref() {
+            // The panel carries its own score — never re-fetch it.
+            chips.apply(None, Some(panel));
+        } else {
+            let win = self.downgrade();
+            crate::ratings::lookup(Kind::Vod, name, year.as_deref(), {
+                let trailer_section = trailer_section.clone();
+                let backdrop = backdrop.clone();
+                move |ratings| {
+                    let Some(win) = win.upgrade() else {
+                        return;
+                    };
+                    if win.imp().details_generation.get() != generation {
+                        return;
+                    }
+                    chips.apply(ratings.as_ref(), None);
+                    if let Some(ratings) = &ratings {
+                        *backdrop.borrow_mut() = ratings.backdrop.clone();
+                        if let Some(section) = &*trailer_section.borrow() {
+                            section.apply_artwork(ratings.backdrop.as_deref());
+                        }
                     }
                 }
-            }
-        });
+            });
+        }
 
         // A little distance from the künye/chips block.
         let play = gtk::Button::builder()
@@ -3399,7 +3632,8 @@ fn episode_row(episode: &Episode) -> gtk::ListBoxRow {
 
 fn content_card(item: &Item, category_label: Option<&str>) -> gtk::FlowBoxChild {
     card_body(
-        &item.name,
+        // "Name (year)" — the panel's score never renders in listings.
+        &item.display_name(),
         item.icon.as_deref(),
         Some(item.kind),
         Some(item.id),

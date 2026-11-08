@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS items (
     item_id     INTEGER NOT NULL,
     category_id TEXT NOT NULL,
     name        TEXT NOT NULL,
+    year        TEXT,
     icon        TEXT,
     rating      TEXT,
     url         TEXT,
@@ -96,8 +97,8 @@ pub fn write(path: &Path, catalog: &Catalog) -> Result<(), Box<dyn std::error::E
     drop(stmt);
 
     let mut stmt = tx.prepare_cached(
-        "INSERT INTO items (kind, item_id, category_id, name, icon, rating, url)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO items (kind, item_id, category_id, name, year, icon, rating, url)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
     )?;
     for item in &catalog.items {
         stmt.execute((
@@ -105,6 +106,7 @@ pub fn write(path: &Path, catalog: &Catalog) -> Result<(), Box<dyn std::error::E
             item.id,
             &item.category_id,
             &item.name,
+            &item.year,
             &item.icon,
             &item.rating,
             &item.url,
@@ -159,8 +161,17 @@ pub fn read(path: &Path) -> Result<Catalog, Box<dyn std::error::Error>> {
     drop(rows);
     drop(stmt);
 
-    let mut stmt =
-        conn.prepare("SELECT kind, item_id, category_id, name, icon, rating, url FROM items")?;
+    // Cache files written by older builds predate the year column —
+    // add it in place; the next ingest backfills the values.
+    let has_year: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('items') WHERE name = 'year'")?
+        .exists([])?;
+    if !has_year {
+        conn.execute_batch("ALTER TABLE items ADD COLUMN year TEXT")?;
+    }
+
+    let mut stmt = conn
+        .prepare("SELECT kind, item_id, category_id, name, year, icon, rating, url FROM items")?;
     let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         catalog.items.push(Item {
@@ -168,9 +179,10 @@ pub fn read(path: &Path) -> Result<Catalog, Box<dyn std::error::Error>> {
             id: row.get(1)?,
             category_id: row.get(2)?,
             name: row.get(3)?,
-            icon: row.get(4)?,
-            rating: row.get(5)?,
-            url: row.get(6)?,
+            year: row.get(4)?,
+            icon: row.get(5)?,
+            rating: row.get(6)?,
+            url: row.get(7)?,
         });
     }
     drop(rows);
