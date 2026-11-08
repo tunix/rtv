@@ -1917,10 +1917,19 @@ impl Window {
         // default soup source presents a generic UA and gets the stream
         // killed (HTTP 520). Swap in our own souphttpsrc with the app UA
         // BEFORE the URI is set so the source picks it up.
-        if let Ok(src) = gstreamer::ElementFactory::make("souphttpsrc").build() {
-            src.set_property("user-agent", crate::xtream::USER_AGENT);
-            playbin.set_property("source", &src);
-        }
+        // The panel origin filters User-Agents (AGENTS.md): playbin's
+        // default soup source presents a generic UA and gets the stream
+        // killed (HTTP 520). Configure the UA via the `source-setup`
+        // signal: playbin builds its own source, and its `source`
+        // property is read-only — assigning it panics, and the panic
+        // aborts (no unwind) inside GTK signal callbacks.
+        playbin.connect("source-setup", false, |values| {
+            let source = values[1]
+                .get::<gstreamer::Element>()
+                .expect("source-setup: missing source element");
+            source.set_property("user-agent", crate::xtream::USER_AGENT);
+            None::<gstreamer::glib::Value>
+        });
         playbin.set_property("uri", uri);
         playbin.set_property("volume", imp.volume_scale.value());
         playbin.set_property("mute", imp.muted.get());
