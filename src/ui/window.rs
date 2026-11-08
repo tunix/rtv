@@ -219,9 +219,12 @@ mod imp {
         /// genre model (the programmatic selection changes must not
         /// re-trigger a re-render).
         pub applying_view: Cell<bool>,
-        /// The genre DropDown's selection model, rebuilt per category
-        /// (genres come from the snapshot's series metadata).
+        /// The genre DropDown's selection model; its StringList content
+        /// is spliced in place per category (swapping the model would
+        /// desync the DropDown's own `selected` property).
         pub genre_model: RefCell<Option<gtk::SingleSelection>>,
+        /// The genre list's item storage (spliced in place by sync).
+        pub genre_list: RefCell<Option<gtk::StringList>>,
         /// The filter popover and its genre row (the row's visibility
         /// follows the active content kind — series only).
         pub filter_popover: RefCell<Option<(gtk::Popover, gtk::Box)>>,
@@ -1665,15 +1668,7 @@ impl Window {
             genre: imp.genre.borrow().clone(),
             sort: imp.grid_sort.get(),
         };
-        let raw_count = indices.len();
         let indices = view.apply(indices);
-        tracing::info!(
-            target: "rtv::ui",
-            kind = ?cat.kind, sort = ?imp.grid_sort.get(),
-            min_rating = imp.min_rating.get(), genre = ?imp.genre.borrow(),
-            shown = indices.len(), raw = raw_count,
-            "grid view applied"
-        );
         drop(vod_genres); // the harvest below mutates the genre map
         imp.content_stack.set_visible_child_name("grid");
         self.fill_grid(indices, &imp.content_grid, false);
@@ -1728,30 +1723,40 @@ impl Window {
 
         let current = imp.genre.borrow().clone();
         let genre_binding = imp.genre_model.borrow();
-        let Some(model) = genre_binding.as_ref() else {
+        let list_binding = imp.genre_list.borrow();
+        let (Some(model), Some(list)) = (genre_binding.as_ref(), list_binding.as_ref()) else {
+            imp.applying_view.set(false);
             return;
         };
-        let new_list = gtk::StringList::new(
-            &["All genres"]
-                .into_iter()
-                .chain(genres.iter().map(|g| g.as_str()))
-                .collect::<Vec<_>>(),
-        );
-        model.set_selected(0); // reset BEFORE the swap (GTK emits no notify on a same-index set)
-        model.set_model(Some(&new_list));
-        // Keep the active genre selection when the new category still
-        // carries it; otherwise the filter resets to "All genres".
-        if let Some(genre) = &current {
-            let found = genres
-                .iter()
-                .position(|g| g.eq_ignore_ascii_case(genre))
-                .map(|p| p as u32 + 1);
-            if let Some(index) = found {
-                model.set_selected(index);
-            } else {
-                *imp.genre.borrow_mut() = None;
-            }
+        // Splice the items IN PLACE: swapping the model under a
+        // DropDown desyncs its own `selected` property (stale index,
+        // wrong label). Splicing keeps one model for the widget's
+        // whole lifetime.
+        let items: Vec<String> = std::iter::once("All genres".to_string())
+            .chain(genres.iter().cloned())
+            .collect();
+        let refs: Vec<&str> = items.iter().map(String::as_str).collect();
+        let old_len = list.n_items();
+        list.splice(0, old_len, &refs);
+        // Keep the active genre selection when the list still carries
+        // it; otherwise the filter resets to "All genres".
+        let target = current
+            .as_ref()
+            .and_then(|g| {
+                genres
+                    .iter()
+                    .position(|x| x.eq_ignore_ascii_case(g))
+                    .map(|p| p as u32 + 1)
+            })
+            .unwrap_or(0);
+        if target == 0 && current.is_some() {
+            *imp.genre.borrow_mut() = None;
         }
+        model.set_selected(target);
+        // Sync can be called from OUTSIDE select_category (the harvest
+        // callback refreshes the list live) — it must always un-guard
+        // the handlers itself, on every exit path.
+        imp.applying_view.set(false);
     }
 
     /// Background harvest of movie genres: fetch get_vod_info for every
@@ -1879,7 +1884,8 @@ impl Window {
         let rating_dd = gtk::DropDown::new(Some(rating_model), None::<gtk::Expression>);
         content.append(&rating_dd);
 
-        let genre_model = gtk::SingleSelection::new(Some(gtk::StringList::new(&["All genres"])));
+        let genre_list = gtk::StringList::new(&["All genres"]);
+        let genre_model = gtk::SingleSelection::new(Some(genre_list.clone()));
         let genre_dd = gtk::DropDown::new(Some(genre_model.clone()), None::<gtk::Expression>);
         let genre_row = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -1898,6 +1904,7 @@ impl Window {
         imp.filter_button.set_popover(Some(&popover));
         *imp.filter_popover.borrow_mut() = Some((popover, genre_row));
         *imp.genre_model.borrow_mut() = Some(genre_model);
+        *imp.genre_list.borrow_mut() = Some(genre_list);
 
         let win = self.downgrade();
         rating_dd.connect_selected_notify(move |dd| {
@@ -1918,18 +1925,16 @@ impl Window {
             if win.imp().applying_view.get() {
                 return;
             }
+            // Read from the DROPDOWN's own state: its selected position
+            // and item are what the button shows, and they can be
+            // (transiently) ahead of the model during content splices.
             let genre = if dd.selected() > 0 {
-                win.imp()
-                    .genre_model
-                    .borrow()
-                    .as_ref()
-                    .and_then(|m| m.selected_item())
+                dd.selected_item()
                     .and_then(|o| o.downcast::<gtk::StringObject>().ok())
                     .map(|o| o.string().to_string())
             } else {
                 None
             };
-            tracing::info!(target: "rtv::ui", genre = ?genre, "genre filter changed");
             *win.imp().genre.borrow_mut() = genre;
             if win.imp().selected_category.get() >= 0 {
                 let selected = win.imp().selected_category.get() as usize;
