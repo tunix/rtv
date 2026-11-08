@@ -13,6 +13,7 @@ IPTV player for the GNOME desktop. Rust + GTK4/libadwaita, Xtream Codes first, M
 - `cargo build` / `cargo test` / `cargo fmt` / `cargo clippy --all-targets` — clippy and fmt must be clean before committing.
 - GUI: `cargo run`
 - Commits: small and meaningful, conventional style (`feat:`, `chore:`). **Never push to `main` and never commit directly to `main` unless Alper explicitly asks.** All changes go through PRs: create a branch, commit there, push the branch, open a PR (gh CLI available). Multiple logical chunks may be split into multiple PRs.
+- **Never commit binary artifacts to the repo** (screenshots, captures, recordings, test dumps, …), not on PR branches and not on `main`. They permanently bloat git history and require history rewrites to remove (this happened — 23 PNGs had to be purged from `main` in 2026-11). PR proof images belong in the PR BODY, embedded from external hosting; a PR that changes the UI must still SHOW its before/after proof, just not in the repo.
 
 ## Product rules
 
