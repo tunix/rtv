@@ -1687,11 +1687,7 @@ impl Window {
 
         // The genre row only shows for series; movies have no genre
         // data without per-item network fetches.
-        let genre_row = imp
-            .filter_popover
-            .borrow()
-            .as_ref()
-            .map(|p| p.1.clone());
+        let genre_row = imp.filter_popover.borrow().as_ref().map(|p| p.1.clone());
         if let Some(row) = genre_row {
             row.set_visible(cat.kind == Kind::Series);
         }
@@ -1730,14 +1726,15 @@ impl Window {
     fn setup_grid_toolbar(&self) {
         let imp = self.imp();
 
-        imp.sort_dropdown.set_model(Some(&gtk::SingleSelection::new(
-            Some(gtk::StringList::new(&[
-                "Source order",
-                "Name (A\u{2013}Z)",
-                "Year (newest)",
-                "Rating (highest)",
-            ])),
-        )));
+        imp.sort_dropdown
+            .set_model(Some(&gtk::SingleSelection::new(Some(
+                gtk::StringList::new(&[
+                    "Source order",
+                    "Name (A\u{2013}Z)",
+                    "Year (newest)",
+                    "Rating (highest)",
+                ]),
+            ))));
         let win = self.downgrade();
         imp.sort_dropdown.connect_selected_notify(move |_| {
             let Some(win) = win.upgrade() else { return };
@@ -1765,22 +1762,29 @@ impl Window {
             .margin_end(12)
             .build();
 
-        content.append(&gtk::Label::builder()
-            .label("Minimum rating")
-            .halign(gtk::Align::Start)
-            .build());
+        content.append(
+            &gtk::Label::builder()
+                .label("Minimum rating")
+                .halign(gtk::Align::Start)
+                .build(),
+        );
         let rating_list = gtk::StringList::new(&["Any", "5.0+", "6.0+", "7.0+", "8.0+"]);
         let rating_model = gtk::SingleSelection::new(Some(rating_list));
         let rating_dd = gtk::DropDown::new(Some(rating_model), None::<gtk::Expression>);
         content.append(&rating_dd);
 
-        content.append(&gtk::Label::builder()
-            .label("Genre")
-            .halign(gtk::Align::Start)
-            .build());
+        content.append(
+            &gtk::Label::builder()
+                .label("Genre")
+                .halign(gtk::Align::Start)
+                .build(),
+        );
         let genre_model = gtk::SingleSelection::new(Some(gtk::StringList::new(&["All genres"])));
         let genre_dd = gtk::DropDown::new(Some(genre_model.clone()), None::<gtk::Expression>);
-        let genre_row = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(6).build();
+        let genre_row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .build();
         genre_row.append(&genre_dd);
         content.append(&genre_row);
 
@@ -1989,8 +1993,7 @@ impl Window {
                             .find(|it| it.kind == fav.kind && it.id == fav.id)
                     })
                     .map(|it| (it.display_name(), it.icon.clone()));
-                let (name, icon) = found
-                    .unwrap_or_else(|| (fav.name.clone(), None));
+                let (name, icon) = found.unwrap_or_else(|| (fav.name.clone(), None));
                 grid.append(&card_body(
                     &name,
                     icon.as_deref(),
@@ -2018,11 +2021,7 @@ impl Window {
         }
         // Fallback: cards without kind data resolve by their title.
         if let Some(name) = card_name(child) {
-            if let Some(item) = catalog
-                .items
-                .iter()
-                .find(|it| it.display_name() == name)
-            {
+            if let Some(item) = catalog.items.iter().find(|it| it.display_name() == name) {
                 match item.kind {
                     Kind::Live => self.play(item.kind, item.id, &item.name),
                     Kind::Series | Kind::Vod => self.open_details(item.kind, item.id, &item.name),

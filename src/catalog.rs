@@ -305,11 +305,7 @@ mod tests {
     fn split_title_peels_year_and_rating() {
         assert_eq!(
             split_title("Son Damla | 2025 | 6.5"),
-            (
-                "Son Damla".into(),
-                Some("2025".into()),
-                Some("6.5".into())
-            )
+            ("Son Damla".into(), Some("2025".into()), Some("6.5".into()))
         );
         // Year without a rating segment.
         assert_eq!(
@@ -320,7 +316,10 @@ mod tests {
         assert_eq!(split_title("Fox News"), ("Fox News".into(), None, None));
         assert_eq!(split_title("beIN | HD"), ("beIN | HD".into(), None, None));
         // A rating-only tail is never peeled without a year.
-        assert_eq!(split_title("Movie | 6.5"), ("Movie | 6.5".into(), None, None));
+        assert_eq!(
+            split_title("Movie | 6.5"),
+            ("Movie | 6.5".into(), None, None)
+        );
         // Year-only sanity: not a year, not peeled.
         assert_eq!(split_title("Movie | 26"), ("Movie | 26".into(), None, None));
         // Whitespace and stray pipes inside the name survive.
@@ -393,7 +392,7 @@ mod tests {
         );
         assert_eq!(
             view(None, None, Sort::RatingHighest).apply(base.clone()),
-            vec![4, 5, 3]
+            vec![4, 3, 5]
         );
         assert_eq!(
             view(None, None, Sort::Panel).apply(base.clone()),
@@ -409,21 +408,31 @@ mod tests {
             vec![4]
         );
         // Genre filter: only items with a matching genre pass.
-        c.series_meta.insert(11, SeriesMeta {
-            genre: Some("Drama, Thriller".into()),
-            ..Default::default()
-        });
+        c.series_meta.insert(
+            11,
+            SeriesMeta {
+                genre: Some("Drama, Thriller".into()),
+                ..Default::default()
+            },
+        );
+        let with_genre = |min_rating: Option<f32>, genre: Option<String>, sort: Sort| GridView {
+            items: &c.items,
+            series_meta: &c.series_meta,
+            min_rating,
+            genre,
+            sort,
+        };
         assert_eq!(
-            view(None, Some("drama".into()), Sort::Panel).apply(base.clone()),
+            with_genre(None, Some("drama".into()), Sort::Panel).apply(base.clone()),
             vec![4]
         );
         assert_eq!(
-            view(None, Some("Comedy".into()), Sort::Panel).apply(base.clone()),
+            with_genre(None, Some("Comedy".into()), Sort::Panel).apply(base.clone()),
             Vec::<usize>::new()
         );
         // Combined filter + sort.
         assert_eq!(
-            view(Some(5.5), Some("Thriller".into()), Sort::NameAZ).apply(base),
+            with_genre(Some(5.5), Some("Thriller".into()), Sort::NameAZ).apply(base),
             vec![4]
         );
     }

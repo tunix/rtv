@@ -373,6 +373,7 @@ mod tests {
                 id: 1,
                 category_id: "L1".into(),
                 name: "Chan".into(),
+                year: None,
                 icon: Some("http://i".into()),
                 rating: None,
                 url: Some("http://s/1".into()),
