@@ -1697,7 +1697,8 @@ impl Window {
         }
 
         let current = imp.genre.borrow().clone();
-        let Some(model) = imp.genre_model.borrow().as_ref() else {
+        let genre_binding = imp.genre_model.borrow();
+        let Some(model) = genre_binding.as_ref() else {
             return;
         };
         let new_list = gtk::StringList::new(
@@ -1789,12 +1790,12 @@ impl Window {
         *imp.genre_model.borrow_mut() = Some(genre_model);
 
         let win = self.downgrade();
-        rating_dd.connect_selected_notify(move |_| {
+        rating_dd.connect_selected_notify(move |dd| {
             let Some(win) = win.upgrade() else { return };
             if win.imp().applying_view.get() {
                 return;
             }
-            let min = [0.0, 5.0, 6.0, 7.0, 8.0][rating_dd.selected() as usize];
+            let min = [0.0, 5.0, 6.0, 7.0, 8.0][dd.selected() as usize];
             win.imp().min_rating.set(min);
             if win.imp().selected_category.get() >= 0 {
                 let selected = win.imp().selected_category.get() as usize;
@@ -1802,12 +1803,12 @@ impl Window {
             }
         });
         let win = self.downgrade();
-        genre_dd.connect_selected_notify(move |_| {
+        genre_dd.connect_selected_notify(move |dd| {
             let Some(win) = win.upgrade() else { return };
             if win.imp().applying_view.get() {
                 return;
             }
-            let genre = if genre_dd.selected() > 0 {
+            let genre = if dd.selected() > 0 {
                 win.imp()
                     .genre_model
                     .borrow()

@@ -193,7 +193,13 @@ impl GridView<'_> {
             Sort::RatingHighest => {
                 out.sort_by(|a, b| {
                     let rating = |i: usize| self.items.get(i).and_then(Item::rating_value);
-                    rating(*b).total_cmp(&rating(*a)).then(a.cmp(b))
+                    // Highest first; unrated titles sink below rated ones.
+                    match (rating(*b), rating(*a)) {
+                        (Some(x), Some(y)) => x.total_cmp(&y).then(a.cmp(b)),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => a.cmp(b),
+                    }
                 });
             }
         }
@@ -299,7 +305,11 @@ mod tests {
     fn split_title_peels_year_and_rating() {
         assert_eq!(
             split_title("Son Damla | 2025 | 6.5"),
-            ("Son Damla".into(), Some("2025".into()), Some("6.5".into()))
+            (
+                "Son Damla".into(),
+                Some("2025".into()),
+                Some("6.5".into())
+            )
         );
         // Year without a rating segment.
         assert_eq!(
@@ -310,10 +320,7 @@ mod tests {
         assert_eq!(split_title("Fox News"), ("Fox News".into(), None, None));
         assert_eq!(split_title("beIN | HD"), ("beIN | HD".into(), None, None));
         // A rating-only tail is never peeled without a year.
-        assert_eq!(
-            split_title("Movie | 6.5"),
-            ("Movie | 6.5".into(), None, None)
-        );
+        assert_eq!(split_title("Movie | 6.5"), ("Movie | 6.5".into(), None, None));
         // Year-only sanity: not a year, not peeled.
         assert_eq!(split_title("Movie | 26"), ("Movie | 26".into(), None, None));
         // Whitespace and stray pipes inside the name survive.
@@ -402,13 +409,10 @@ mod tests {
             vec![4]
         );
         // Genre filter: only items with a matching genre pass.
-        c.series_meta.insert(
-            11,
-            SeriesMeta {
-                genre: Some("Drama, Thriller".into()),
-                ..Default::default()
-            },
-        );
+        c.series_meta.insert(11, SeriesMeta {
+            genre: Some("Drama, Thriller".into()),
+            ..Default::default()
+        });
         assert_eq!(
             view(None, Some("drama".into()), Sort::Panel).apply(base.clone()),
             vec![4]
