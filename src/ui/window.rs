@@ -486,6 +486,69 @@ impl Window {
         }
     }
 
+    /// A source was deleted from the settings dialog. Re-syncs the
+    /// dropdown and repairs the browse view: the window renders an
+    /// in-memory snapshot, so the deleted source's categories, grids
+    /// and search results must NOT survive the deletion. With sources
+    /// remaining a survivor takes over (the one the user was browsing,
+    /// else the first ready one); with none left the view clears to
+    /// the intentional empty state and the remembered active source is
+    /// wiped. The per-source catalog and detail caches are already
+    /// gone on disk — store::delete_source removes the source's whole
+    /// data directory.
+    pub fn on_source_deleted(&self, deleted: u64, prev_active: u64) {
+        self.sync_sources_ui();
+        let sources = self.imp().sources_model.all();
+        match crate::ui::sources::delete_handover(&sources, deleted, prev_active) {
+            Some(id) => self.reveal_source(id),
+            None => {
+                tracing::info!(
+                    target: "rtv::ui",
+                    deleted,
+                    "last source deleted — clearing browse snapshot"
+                );
+                crate::store::set_last_source(0);
+                if !self.catalog().is_empty() {
+                    self.apply_catalog(Catalog::default());
+                }
+                // First-launch state: the welcome screen owns the
+                // "Add source" affordance, and browsing an empty world
+                // is pointless. pop_to_page unwinds EVERYTHING stacked
+                // on the welcome page; the pop handler tears the player
+                // down, but pop_to_page's signal granularity is not
+                // guaranteed per page — stop the pipeline explicitly.
+                let imp = self.imp();
+                imp.on_player.set(false);
+                self.cancel_hide();
+                self.stop_pipeline();
+                imp.main_view.pop_to_page(&*imp.welcome_page);
+            }
+        }
+    }
+
+    /// Make `id` the visible source: move the dropdown onto it and
+    /// apply its snapshot. An explicit apply on an unchanged selection
+    /// is REQUIRED, not paranoia: GTK emits no notify when
+    /// `set_selected` keeps the same index, and a deletion that leaves
+    /// the index pointing at the same position is exactly the
+    /// stale-snapshot case this method exists for.
+    fn reveal_source(&self, id: u64) {
+        let imp = self.imp();
+        let Some(position) = imp.sources_model.all().iter().position(|s| s.id == id) else {
+            return;
+        };
+        let Some(dropdown) = imp.dropdown.borrow().clone() else {
+            return;
+        };
+        if dropdown.selected() == position as u32 {
+            crate::store::set_last_source(id);
+            self.show_source_snapshot(id);
+        } else {
+            // The notify handler applies the snapshot + records last_source.
+            dropdown.set_selected(position as u32);
+        }
+    }
+
     /// Install the closure the settings dialog uses to hand us catalog
     /// snapshots per source id (the model lives there; the window only
     /// renders from it).
@@ -845,6 +908,14 @@ impl Window {
         let imp = self.imp();
         self.on_sources_changed();
         if !imp.has_source.get() {
+            // Zero sources: browsing an empty world is meaningless.
+            // Whatever page we are on (welcome included — pop_to_page
+            // is a no-op then), return to the welcome screen with its
+            // "Add source" affordance. Teardown mirrors the delete path.
+            imp.on_player.set(false);
+            self.cancel_hide();
+            self.stop_pipeline();
+            imp.main_view.pop_to_page(&*imp.welcome_page);
             return;
         }
         let Some(visible) = imp.main_view.visible_page() else {
@@ -991,33 +1062,6 @@ impl Window {
             crate::store::set_last_source(source.id);
             win.show_source_snapshot(source.id);
         });
-
-        // Pinned Favorites row at the very top of the sidebar: always
-        // visible, unaffected by section collapse and search filtering.
-        // Formatted like the main-category headers: icon + bold label.
-        let favorites_row = gtk::ListBoxRow::new();
-        let favorites_box = gtk::Box::builder().spacing(6).build();
-        favorites_box.append(
-            // Bundled icon: the theme's emblem-favorite-symbolic is missing
-            // in current Adwaita, and the colored fallback renders RED.
-            &gtk::Image::builder()
-                .icon_name("rtv-heart-symbolic")
-                .pixel_size(14)
-                .valign(gtk::Align::Center)
-                .build(),
-        );
-        let favorites_label = gtk::Label::builder()
-            .label("Favorites (0)")
-            .halign(gtk::Align::Start)
-            .css_classes(["heading"])
-            .build();
-        favorites_box.append(&favorites_label);
-        favorites_row.set_child(Some(&favorites_box));
-        imp.content_list.prepend(&favorites_row);
-        imp.favorites_label.replace(Some(favorites_label));
-        imp.favorites_row_index.set(favorites_row.index());
-
-        self.setup_sidebar();
 
         // Sidebar activation: the Favorites row first, then categories.
         let win = self.downgrade();
@@ -1265,6 +1309,36 @@ impl Window {
     /// active search query.
     fn setup_sidebar(&self) {
         let imp = self.imp();
+
+        // Pinned Favorites row at the very top of the sidebar: always
+        // visible, unaffected by section collapse and search filtering.
+        // Formatted like the main-category headers: icon + bold label.
+        // OWNED by this rebuild (created ONCE in setup_browse before):
+        // apply_catalog wipes every content_list child and re-runs this,
+        // and the one-shot row used to vanish above Live TV from the
+        // first catalog application onward.
+        let favorites_row = gtk::ListBoxRow::new();
+        let favorites_box = gtk::Box::builder().spacing(6).build();
+        favorites_box.append(
+            // Bundled icon: the theme's emblem-favorite-symbolic is missing
+            // in current Adwaita, and the colored fallback renders RED.
+            &gtk::Image::builder()
+                .icon_name("rtv-heart-symbolic")
+                .pixel_size(14)
+                .valign(gtk::Align::Center)
+                .build(),
+        );
+        let favorites_label = gtk::Label::builder()
+            .label("Favorites (0)")
+            .halign(gtk::Align::Start)
+            .css_classes(["heading"])
+            .build();
+        favorites_box.append(&favorites_label);
+        favorites_row.set_child(Some(&favorites_box));
+        imp.content_list.prepend(&favorites_row);
+        imp.favorites_label.replace(Some(favorites_label));
+        imp.favorites_row_index.set(favorites_row.index());
+
         let catalog = self.catalog();
 
         for (group, kind) in Kind::SIDEBAR.iter().enumerate() {

@@ -644,12 +644,26 @@ impl Ctx {
             if response != "delete" {
                 return;
             }
+            // The window derives its notion of "active source" from the
+            // dropdown index, which the removal below invalidates —
+            // capture the id BEFORE the model row disappears.
+            let prev_active = ctx
+                .win
+                .upgrade()
+                .map(|win| win.active_source_id())
+                .unwrap_or(0);
             crate::store::delete_source(id);
             ctx.model.remove(id);
             if ctx.detail.open_id.get() == Some(id) {
                 if let Some(nav) = ctx.nav.upgrade() {
                     nav.pop();
                 }
+            }
+            // The browse view renders the window's in-memory snapshot:
+            // with the source gone it must hand over to a survivor or
+            // clear entirely (no stale categories/grids/search results).
+            if let Some(win) = ctx.win.upgrade() {
+                win.on_source_deleted(id, prev_active);
             }
             ctx.toast("Source deleted");
             ctx.sync();
@@ -1464,6 +1478,30 @@ impl SettingsUi {
     }
 }
 
+/// Deletion handover decision: after removing the source `deleted`,
+/// which surviving source should the browse view show? `prev_active`
+/// is the id the window was displaying before the removal.
+///
+/// Preference: keep the source the user was browsing if it survived
+/// the removal, else the first READY survivor, else the first survivor
+/// at all (an indexing source still beats a blank view — its snapshot
+/// apply falls back to an empty catalog until the ingest finishes).
+/// `None` = no sources remain; the browse view must clear entirely.
+pub fn delete_handover(sources: &[Source], deleted: u64, prev_active: u64) -> Option<u64> {
+    // Tolerant of the deleted id still being present (the caller may
+    // hand over the pre-removal list): every lookup skips it.
+    let survivors = || sources.iter().filter(|s| s.id != deleted);
+    if prev_active != deleted {
+        if let Some(active) = survivors().find(|s| s.id == prev_active) {
+            return Some(active.id);
+        }
+    }
+    survivors()
+        .find(|s| s.state == SourceState::Ready)
+        .or_else(|| survivors().next())
+        .map(|s| s.id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1481,6 +1519,59 @@ mod tests {
             url: "http://example.com/list.m3u".into(),
             epg: String::new(),
         }
+    }
+
+    fn raw_source(id: u64, state: SourceState) -> Source {
+        Source {
+            id,
+            name: format!("Source {id}"),
+            kind: xtream_source(),
+            state,
+            failure: None,
+            live_cats: 0,
+            live_items: 0,
+            vod_cats: 0,
+            vod_items: 0,
+            series_cats: 0,
+            series_items: 0,
+            section_hidden: [false; 3],
+            snapshot: None,
+        }
+    }
+
+    #[test]
+    fn delete_handover_keeps_the_browsed_source() {
+        let sources = [
+            raw_source(1, SourceState::Ready),
+            raw_source(2, SourceState::Ready),
+        ];
+        assert_eq!(delete_handover(&sources, 2, 2), Some(1));
+        assert_eq!(delete_handover(&sources, 2, 1), Some(1));
+    }
+
+    #[test]
+    fn delete_handover_falls_back_to_first_ready() {
+        let sources = [
+            raw_source(1, SourceState::Failed),
+            raw_source(2, SourceState::Ready),
+            raw_source(3, SourceState::Indexing),
+        ];
+        assert_eq!(delete_handover(&sources, 3, 3), Some(2));
+    }
+
+    #[test]
+    fn delete_handover_last_resort_is_first_survivor() {
+        let sources = [
+            raw_source(5, SourceState::Indexing),
+            raw_source(7, SourceState::Indexing),
+        ];
+        assert_eq!(delete_handover(&sources, 9, 9), Some(5));
+    }
+
+    #[test]
+    fn delete_handover_none_left_clears_the_view() {
+        let sources: [Source; 0] = [];
+        assert_eq!(delete_handover(&sources, 1, 1), None);
     }
 
     #[test]
