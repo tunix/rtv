@@ -88,35 +88,81 @@ fn parse_rating(text: &str) -> Option<f32> {
 }
 
 fn is_year(text: &str) -> bool {
-    text.len() == 4 && text.chars().all(|c| c.is_ascii_digit())
+    text.len() == 4
+        && text.chars().all(|c| c.is_ascii_digit())
+        && text
+            .parse::<u32>()
+            .is_ok_and(|y| (1900..=2099).contains(&y))
 }
 
-/// Panels embed the year and the score in the item name
-/// ("Son Damla | 2025 | 6.5"). Split a trailing
-/// "| <year> [| <rating>]" segment off: the pieces feed the year-aware
-/// listing label, the rating chip and the clean-title lookups. Only a
-/// trailing segment in exactly that shape is parsed — anything else
-/// stays verbatim (live channel names, "Movie (2026)" etc.).
+/// Panels decorate the item name in several shapes: "Ad | 2025 | 6.5",
+/// "Ad | 2023 | 7.0 | DSNP | 4K" (year-anchored pipes with trailing
+/// junk tags), "Captain Marvel (2019)" (trailing parenthesized year).
+/// Peel what matches; anything that does not fit stays verbatim —
+/// live channel names, "Movie | 6.5" (a rating without a year is
+/// never peeled), "Movie | 26" and so on.
 pub fn split_title(raw: &str) -> (String, Option<String>, Option<String>) {
     let raw = raw.trim();
     let parts: Vec<&str> = raw.split('|').collect();
-    let mut name_parts: &[&str] = &parts;
-    let mut year = None;
-    let mut rating = None;
     if parts.len() >= 2 {
-        let last = parts[parts.len() - 1].trim();
-        let before = parts[parts.len() - 2].trim();
-        if parts.len() >= 3 && is_year(before) && parse_rating(last).is_some() {
-            rating = Some(last.to_string());
-            year = Some(before.to_string());
-            name_parts = &parts[..parts.len() - 2];
-        } else if is_year(last) {
-            year = Some(last.to_string());
-            name_parts = &parts[..parts.len() - 1];
+        // Year-anchored: the first pipe segment (after the name) that is
+        // a bare 4-digit year ends the display name; a segment parsing
+        // as a rating right after it is the score; everything beyond is
+        // decoration ("DSNP", "4K", …) and is dropped.
+        if let Some(year_idx) = (1..parts.len()).find(|&i| is_year(parts[i].trim())) {
+            let name = parts[..year_idx].join("|").trim().to_string();
+            if !name.is_empty() {
+                let year = parts[year_idx].trim().to_string();
+                let rating = parts
+                    .get(year_idx + 1)
+                    .and_then(|s| parse_rating(s.trim()))
+                    .map(|_| parts[year_idx + 1].trim().to_string());
+                return (name, Some(year), rating);
+            }
         }
     }
-    let name = name_parts.join("|").trim().to_string();
-    (name, year, rating)
+    // Trailing parenthesized year: "Captain Marvel (2019)".
+    if raw.ends_with(')') {
+        if let Some(open) = raw.rfind('(') {
+            let inner = raw[open + 1..raw.len() - 1].trim();
+            if is_year(inner) && open > 0 {
+                let name = raw[..open]
+                    .trim()
+                    .trim_end_matches(['-', '–', ':'])
+                    .trim()
+                    .to_string();
+                if !name.is_empty() {
+                    return (name, Some(inner.to_string()), None);
+                }
+            }
+        }
+    }
+    (raw.to_string(), None, None)
+}
+
+/// Pick the display title from the panel's name/title fields. Some
+/// panels keep a clean `name` with a decorated `title`, others the
+/// reverse: prefer the clean candidate for the display name and take
+/// the year/rating from the decorated one.
+pub fn best_title(
+    name_raw: &str,
+    title_raw: Option<&str>,
+) -> (String, Option<String>, Option<String>) {
+    let (n, ny, nr) = split_title(name_raw);
+    let title_differs = title_raw
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && *t != name_raw.trim());
+    let Some(t) = title_differs else {
+        return (n, ny, nr);
+    };
+    let (tn, ty, tr) = split_title(t);
+    let name_clean = ny.is_none() && nr.is_none();
+    let title_clean = ty.is_none() && tr.is_none();
+    match (name_clean, title_clean) {
+        (true, false) => (n, ty, tr),
+        (false, true) => (tn, ny, nr),
+        _ => (n, ny.or(ty), nr.or(tr)),
+    }
 }
 
 /// Grid view ordering for the Series/Movies toolbars. `Panel` is the
@@ -133,16 +179,28 @@ pub enum Sort {
 /// One grid "view": a min-rating filter, a genre filter and a sort
 /// order. Filters drop items (items without a rating never pass a
 /// min-rating filter); sorting keeps panel order as the tiebreaker so
-/// the result is stable.
+/// the result is stable. The genre of a movie comes from the harvested
+/// vod-info map (`vod_genres`), a series' from its inline metadata.
 pub struct GridView<'a> {
     pub items: &'a [Item],
     pub series_meta: &'a HashMap<i64, SeriesMeta>,
+    pub vod_genres: &'a HashMap<i64, String>,
     pub min_rating: Option<f32>,
     pub genre: Option<String>,
     pub sort: Sort,
 }
 
 impl GridView<'_> {
+    /// The item's genre string from whichever source carries it.
+    fn genre_of(&self, it: &Item) -> Option<String> {
+        if let Some(meta) = self.series_meta.get(&it.id) {
+            if let Some(g) = &meta.genre {
+                return Some(g.clone());
+            }
+        }
+        self.vod_genres.get(&it.id).cloned()
+    }
+
     /// Sort + filter a list of catalog indices; the panel order is the
     /// fallback everywhere (missing years/ratings sort last, ties keep
     /// the source order).
@@ -159,14 +217,12 @@ impl GridView<'_> {
                 let Some(genre) = &genre else {
                     return true;
                 };
-                self.items
-                    .get(i)
-                    .and_then(|it| self.series_meta.get(&it.id))
-                    .and_then(|m| m.genre.as_deref())
-                    .is_some_and(|g| {
+                self.items.get(i).is_some_and(|it| {
+                    self.genre_of(it).is_some_and(|g| {
                         g.split(',')
                             .any(|part| part.trim().to_lowercase() == genre.as_str())
                     })
+                })
             })
             .collect();
         match self.sort {
@@ -312,6 +368,28 @@ mod tests {
             split_title("GTA VI | 2026"),
             ("GTA VI".into(), Some("2026".into()), None)
         );
+        // Decorated pipes: tags after the rating are dropped.
+        assert_eq!(
+            split_title("Bursa Bülbülü | 2023 | 7.0 | DSNP | 4K"),
+            (
+                "Bursa Bülbülü".into(),
+                Some("2023".into()),
+                Some("7.0".into())
+            )
+        );
+        // Trailing parenthesized year (no pipes at all).
+        assert_eq!(
+            split_title("Captain Marvel (2019)"),
+            ("Captain Marvel".into(), Some("2019".into()), None)
+        );
+        assert_eq!(
+            split_title("Star Wars: Bölüm XIII - Son Jedi (2017)"),
+            (
+                "Star Wars: Bölüm XIII - Son Jedi".into(),
+                Some("2017".into()),
+                None
+            )
+        );
         // No year/rating segment stays verbatim.
         assert_eq!(split_title("Fox News"), ("Fox News".into(), None, None));
         assert_eq!(split_title("beIN | HD"), ("beIN | HD".into(), None, None));
@@ -328,6 +406,34 @@ mod tests {
             (
                 "Movie: Part | 2".into(),
                 Some("2024".into()),
+                Some("7.0".into())
+            )
+        );
+    }
+
+    #[test]
+    fn best_title_prefers_the_clean_candidate() {
+        // name decorated, title clean → title wins the display name.
+        assert_eq!(
+            best_title("Son Damla | 2025 | 6.5", Some("Son Damla")),
+            ("Son Damla".into(), Some("2025".into()), Some("6.5".into()))
+        );
+        // name clean, title decorated → name wins, pieces from the title.
+        assert_eq!(
+            best_title("Son Damla", Some("Son Damla | 2025 | 6.5")),
+            ("Son Damla".into(), Some("2025".into()), Some("6.5".into()))
+        );
+        // Both decorated → name's parse wins.
+        assert_eq!(
+            best_title("A | 2020 | 5.0", Some("A | 2021")),
+            ("A".into(), Some("2020".into()), Some("5.0".into()))
+        );
+        // Missing/identical title → name only.
+        assert_eq!(
+            best_title("Bursa Bülbülü | 2023 | 7.0 | DSNP", None),
+            (
+                "Bursa Bülbülü".into(),
+                Some("2023".into()),
                 Some("7.0".into())
             )
         );
@@ -374,9 +480,11 @@ mod tests {
         c.items[5].rating = Some("5.0".into());
 
         let base = vec![3usize, 4, 5];
+        let vod_genres: HashMap<i64, String> = HashMap::new();
         let view = |min_rating, genre, sort| GridView {
             items: &c.items,
             series_meta: &c.series_meta,
+            vod_genres: &vod_genres,
             min_rating,
             genre,
             sort,
@@ -418,6 +526,7 @@ mod tests {
         let with_genre = |min_rating: Option<f32>, genre: Option<String>, sort: Sort| GridView {
             items: &c.items,
             series_meta: &c.series_meta,
+            vod_genres: &vod_genres,
             min_rating,
             genre,
             sort,
@@ -434,6 +543,55 @@ mod tests {
         assert_eq!(
             with_genre(Some(5.5), Some("Thriller".into()), Sort::NameAZ).apply(base),
             vec![4]
+        );
+    }
+
+    #[test]
+    fn grid_view_genre_reaches_harvested_movies() {
+        let c = sample();
+        let mut vod_genres: HashMap<i64, String> = HashMap::new();
+        // Movie id 10 harvested as "Gerilim, Dram".
+        vod_genres.insert(10, "Gerilim, Dram".into());
+        let view = |genre: Option<String>| GridView {
+            items: &c.items,
+            series_meta: &c.series_meta,
+            vod_genres: &vod_genres,
+            min_rating: None,
+            genre,
+            sort: Sort::Panel,
+        };
+        assert_eq!(view(Some("Dram".into())).apply(vec![3usize]), vec![3]);
+        assert_eq!(view(Some("Gerilim".into())).apply(vec![3usize]), vec![3]);
+        assert_eq!(
+            view(Some("Comedy".into())).apply(vec![3usize]),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn grid_view_series_meta_beats_harvested_movie_genre() {
+        let mut c = sample();
+        c.series_meta.insert(
+            10,
+            SeriesMeta {
+                genre: Some("Comedy".into()),
+                ..Default::default()
+            },
+        );
+        let mut vod_genres: HashMap<i64, String> = HashMap::new();
+        vod_genres.insert(10, "Dram".into());
+        let view = |genre: Option<String>| GridView {
+            items: &c.items,
+            series_meta: &c.series_meta,
+            vod_genres: &vod_genres,
+            min_rating: None,
+            genre,
+            sort: Sort::Panel,
+        };
+        assert_eq!(view(Some("Comedy".into())).apply(vec![3usize]), vec![3]);
+        assert_eq!(
+            view(Some("Dram".into())).apply(vec![3usize]),
+            Vec::<usize>::new()
         );
     }
 

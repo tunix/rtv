@@ -319,7 +319,8 @@ fn parse_series_list(list: &[Value]) -> (Vec<Item>, Vec<(i64, SeriesMeta)>) {
             let id = s.get("series_id").and_then(Value::as_i64)?;
             let category_id = s.get("category_id").and_then(Value::as_str)?.to_string();
             let raw_name = s.get("name").and_then(Value::as_str)?.to_string();
-            let (name, year, name_rating) = crate::catalog::split_title(&raw_name);
+            let title = s.get("title").and_then(Value::as_str);
+            let (name, year, name_rating) = crate::catalog::best_title(&raw_name, title);
             Some(Item {
                 kind: Kind::Series,
                 id,
@@ -345,9 +346,10 @@ fn parse_series_list(list: &[Value]) -> (Vec<Item>, Vec<(i64, SeriesMeta)>) {
 }
 
 /// Parse a live/vod stream array (stream_id + category_id + name).
-/// VOD names often embed "| <year> [| <rating>]" — split_title peels
-/// them so listings show "Name (year)" and the score rides the rating
-/// field; live names stay verbatim.
+/// VOD names often embed "| <year> [| <rating> | tags…]" — best_title
+/// peels them (preferring a clean name/title field when the panel
+/// carries both) so listings show "Name (year)" and the score rides
+/// the rating field; live names stay verbatim.
 fn parse_stream_list(list: &[Value], kind: Kind) -> Vec<Item> {
     list.iter()
         .filter_map(|s| {
@@ -358,9 +360,9 @@ fn parse_stream_list(list: &[Value], kind: Kind) -> Vec<Item> {
             })?;
             let category_id = s.get("category_id").and_then(Value::as_str)?.to_string();
             let name = s.get("name").and_then(Value::as_str)?.to_string();
+            let title = s.get("title").and_then(Value::as_str);
             let (name, year, name_rating) = if kind == Kind::Vod {
-                let (n, y, r) = crate::catalog::split_title(&name);
-                (n, y, r)
+                crate::catalog::best_title(&name, title)
             } else {
                 (name, None, None)
             };
@@ -611,6 +613,36 @@ mod tests {
         // The panel's own rating fills in when the name carries none.
         assert_eq!(items[3].rating.as_deref(), Some("7.2"));
         assert_eq!(items[3].display_name(), "Rated Movie");
+    }
+
+    #[test]
+    fn parse_vod_prefers_a_clean_title_field() {
+        // The panel keeps a clean `title` and a decorated `name`.
+        let raw = vec![json!({
+            "stream_id": 10, "category_id": "V1",
+            "name": "Bursa Bülbülü | 2023 | 7.0 | DSNP | 4K",
+            "title": "Bursa Bülbülü",
+            "rating": "0"
+        })];
+        let items = parse_stream_list(&raw, Kind::Vod);
+        assert_eq!(items[0].name, "Bursa Bülbülü");
+        assert_eq!(items[0].year.as_deref(), Some("2023"));
+        assert_eq!(items[0].rating.as_deref(), Some("7.0"));
+        assert_eq!(items[0].display_name(), "Bursa Bülbülü (2023)");
+    }
+
+    #[test]
+    fn parse_series_uses_the_title_field_when_cleaner() {
+        let raw = vec![json!({
+            "series_id": 7001, "category_id": "S1",
+            "name": "Heartstopper | 2026 | 7.0",
+            "title": "Heartstopper: Sonsuza Dek",
+            "rating": "0"
+        })];
+        let (items, _) = parse_series_list(&raw);
+        assert_eq!(items[0].name, "Heartstopper: Sonsuza Dek");
+        assert_eq!(items[0].year.as_deref(), Some("2026"));
+        assert_eq!(items[0].rating.as_deref(), Some("7.0"));
     }
 
     #[test]

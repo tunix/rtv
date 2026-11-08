@@ -63,6 +63,7 @@ mod imp {
     use adw::subclass::prelude::*;
     use gtk::{glib, TemplateChild};
     use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
     use std::rc::Rc;
 
     /// Per-source catalog snapshot lookup installed by the settings dialog.
@@ -224,6 +225,13 @@ mod imp {
         /// The filter popover and its genre row (the row's visibility
         /// follows the active content kind — series only).
         pub filter_popover: RefCell<Option<(gtk::Popover, gtk::Box)>>,
+        /// Harvested movie genres: vod id -> "Genre A, Genre B". Filled
+        /// by the background get_vod_info harvest (each detail fetch is
+        /// already cached on disk, so repeated sessions fill fast).
+        pub vod_genre: RefCell<HashMap<i64, String>>,
+        /// Bumped when a new harvest starts; stale harvest callbacks
+        /// (leftover chain from a previous category) no-op.
+        pub harvest_generation: Cell<u64>,
         pub last_pointer: Cell<(f64, f64)>,
         pub favorites: RefCell<Vec<FavKey>>,
         /// What the player page is showing, so the heart button can
@@ -1645,9 +1653,11 @@ impl Window {
             .map(|(i, _)| i)
             .collect();
         // The user's sort + filter view rides on top of the panel order.
+        let vod_genres = imp.vod_genre.borrow();
         let view = crate::catalog::GridView {
             items: &catalog.items,
             series_meta: &catalog.series_meta,
+            vod_genres: &vod_genres,
             min_rating: {
                 let min = imp.min_rating.get();
                 (min > 0.0).then_some(min)
@@ -1655,16 +1665,31 @@ impl Window {
             genre: imp.genre.borrow().clone(),
             sort: imp.grid_sort.get(),
         };
+        let raw_count = indices.len();
         let indices = view.apply(indices);
+        tracing::info!(
+            target: "rtv::ui",
+            kind = ?cat.kind, sort = ?imp.grid_sort.get(),
+            min_rating = imp.min_rating.get(), genre = ?imp.genre.borrow(),
+            shown = indices.len(), raw = raw_count,
+            "grid view applied"
+        );
+        drop(vod_genres); // the harvest below mutates the genre map
         imp.content_stack.set_visible_child_name("grid");
         self.fill_grid(indices, &imp.content_grid, false);
+        // Movies: fill the genre filter in the background (cached
+        // get_vod_info fetches, one at a time).
+        if cat.kind == Kind::Vod {
+            self.harvest_vod_genres(&catalog, cat);
+        }
     }
 
     /// Rebuild the filter popover's genre DropDown model from the
-    /// current category's series metadata ("All genres" first). Movies
-    /// carry no genre in the catalog, so the row hides there. The
-    /// programmatic selection changes run under `applying_view` — the
-    /// handlers must not re-render.
+    /// current category's data ("All genres" first): series read their
+    /// genre from the snapshot's inline series metadata, movies from
+    /// the background get_vod_info harvest (`vod_genre`), which keeps
+    /// growing as results land. The programmatic selection changes run
+    /// under `applying_view` — the handlers must not re-render.
     fn sync_genre_model(&self, catalog: &Catalog, cat: &Category) {
         let imp = self.imp();
         imp.applying_view.set(true);
@@ -1674,10 +1699,19 @@ impl Window {
                 .items
                 .iter()
                 .filter(|it| it.kind == cat.kind && it.category_id == cat.id)
-                .filter_map(|it| catalog.series_meta.get(&it.id))
-                .filter_map(|meta| meta.genre.as_deref())
-                .flat_map(|g| g.split(','))
-                .map(|g| g.trim().to_string())
+                .filter_map(|it| match cat.kind {
+                    Kind::Series => catalog
+                        .series_meta
+                        .get(&it.id)
+                        .and_then(|m| m.genre.clone()),
+                    Kind::Vod => imp.vod_genre.borrow().get(&it.id).cloned(),
+                    Kind::Live => None,
+                })
+                .flat_map(|g| {
+                    g.split(',')
+                        .map(|p| p.trim().to_string())
+                        .collect::<Vec<String>>()
+                })
                 .filter(|g| !g.is_empty())
                 .collect();
             seen.sort_by_key(|g| g.to_lowercase());
@@ -1685,11 +1719,11 @@ impl Window {
             seen
         };
 
-        // The genre row only shows for series; movies have no genre
-        // data without per-item network fetches.
+        // The genre row shows for series AND movies (movie genres fill
+        // in as the background harvest lands) — hidden for Live TV.
         let genre_row = imp.filter_popover.borrow().as_ref().map(|p| p.1.clone());
         if let Some(row) = genre_row {
-            row.set_visible(cat.kind == Kind::Series);
+            row.set_visible(cat.kind != Kind::Live);
         }
 
         let current = imp.genre.borrow().clone();
@@ -1718,6 +1752,78 @@ impl Window {
                 *imp.genre.borrow_mut() = None;
             }
         }
+    }
+
+    /// Background harvest of movie genres: fetch get_vod_info for every
+    /// item of the current Movies category that has no genre yet, ONE at
+    /// a time on the main loop (each fetch is memory/disk cached from
+    /// the detail page, so repeat sessions are instant), and store
+    /// `info.genre` into `vod_genre`. Each result refreshes the genre
+    /// dropdown's model, so the filter fills in live. Leaving the
+    /// category (or a catalog refresh) bumps the generation and stops
+    /// the chain.
+    fn harvest_vod_genres(&self, catalog: &Catalog, cat: &Category) {
+        let imp = self.imp();
+        imp.harvest_generation.set(imp.harvest_generation.get() + 1);
+        let generation = imp.harvest_generation.get();
+
+        let pending: Vec<i64> = catalog
+            .items
+            .iter()
+            .filter(|it| it.kind == Kind::Vod && it.category_id == cat.id)
+            .filter(|it| !imp.vod_genre.borrow().contains_key(&it.id))
+            .map(|it| it.id)
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        tracing::info!(
+            target: "rtv::ui",
+            category = %cat.name, count = pending.len(),
+            "vod genre harvest started"
+        );
+        let source_id = self.active_source_id();
+        let queue: Rc<RefCell<Vec<i64>>> = Rc::new(RefCell::new(pending));
+
+        // Sequential driver: each callback pops the next id and fetches
+        // it, keeping exactly one request in flight.
+        fn drive(win: &Window, queue: Rc<RefCell<Vec<i64>>>, generation: u64, source_id: u64) {
+            let next = queue.borrow_mut().pop();
+            let Some(id) = next else {
+                tracing::info!(target: "rtv::ui", generation, "vod genre harvest done");
+                return;
+            };
+            let win_weak = win.downgrade();
+            let queue = queue.clone();
+            details::vod_info(source_id, id, move |result| {
+                let Some(win) = win_weak.upgrade() else {
+                    return;
+                };
+                let imp = win.imp();
+                if imp.harvest_generation.get() != generation {
+                    return; // category changed / catalog replaced
+                }
+                if let Some(genre) = result
+                    .and_then(|i| i.genre)
+                    .filter(|g| !g.trim().is_empty())
+                {
+                    imp.vod_genre.borrow_mut().insert(id, genre);
+                    // Refresh the dropdown's model live; sync runs under
+                    // the guard so the change never re-renders the grid.
+                    if imp.selected_category.get() >= 0 {
+                        let selected = imp.selected_category.get() as usize;
+                        let catalog = win.catalog();
+                        if let Some(cat) = catalog.categories.get(selected) {
+                            if cat.kind == Kind::Vod {
+                                win.sync_genre_model(&catalog, cat);
+                            }
+                        }
+                    }
+                }
+                drive(&win, queue, generation, source_id);
+            });
+        }
+        drive(self, queue, generation, source_id);
     }
 
     /// Wire the grid toolbar: the sort DropDown, the min-rating and
@@ -1773,18 +1879,18 @@ impl Window {
         let rating_dd = gtk::DropDown::new(Some(rating_model), None::<gtk::Expression>);
         content.append(&rating_dd);
 
-        content.append(
-            &gtk::Label::builder()
-                .label("Genre")
-                .halign(gtk::Align::Start)
-                .build(),
-        );
         let genre_model = gtk::SingleSelection::new(Some(gtk::StringList::new(&["All genres"])));
         let genre_dd = gtk::DropDown::new(Some(genre_model.clone()), None::<gtk::Expression>);
         let genre_row = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(6)
             .build();
+        genre_row.append(
+            &gtk::Label::builder()
+                .label("Genre")
+                .halign(gtk::Align::Start)
+                .build(),
+        );
         genre_row.append(&genre_dd);
         content.append(&genre_row);
 
@@ -1823,6 +1929,7 @@ impl Window {
             } else {
                 None
             };
+            tracing::info!(target: "rtv::ui", genre = ?genre, "genre filter changed");
             *win.imp().genre.borrow_mut() = genre;
             if win.imp().selected_category.get() >= 0 {
                 let selected = win.imp().selected_category.get() as usize;
