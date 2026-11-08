@@ -7,6 +7,13 @@ IPTV player for the GNOME desktop. Rust + GTK4/libadwaita, Xtream Codes first, M
 - Develop inside the `rtv` distrobox container (Fedora): `distrobox enter rtv`
   (create once with: `distrobox create -n rtv -i registry.fedoraproject.org/fedora-toolbox:latest`)
 - Run all cargo/git commands in the container; the repo is shared with the host.
+- **Work in a git worktree, not the main clone.** `/root/rtv` is the shared
+  home checkout: it stays on `main`, clean, for whoever needs it (human or
+  agent sessions run in parallel on this box). For feature work run
+  `git worktree add /root/rtv-wt <branch>` and build/test/commit inside the
+  worktree. Never leave the main clone checked out on a feature branch; when
+  the PR merges, pull `origin/main` in `/root/rtv` and refresh or remove the
+  worktree.
 
 ## Commands
 
