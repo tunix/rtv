@@ -87,6 +87,8 @@ pub struct VodInfo {
     pub director: Option<String>,
     pub duration: Option<String>,
     pub release_date: Option<String>,
+    /// The panel's own score for the movie (panel-first rating rule).
+    pub rating: Option<String>,
     /// YouTube trailer link, when the panel carries one.
     pub trailer: Option<String>,
 }
@@ -337,6 +339,11 @@ fn parse_vod_info(value: &Value) -> Option<VodInfo> {
         director: str_field(info, "director"),
         duration: str_field(info, "duration"),
         release_date: str_field(info, "releasedate").or_else(|| str_field(info, "releaseDate")),
+        rating: info.get("rating").and_then(|v| match v {
+            Value::String(s) if !s.is_empty() && s != "null" && s != "0" => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        }),
         trailer: str_field(info, "youtube_trailer"),
     })
 }

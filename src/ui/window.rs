@@ -1914,6 +1914,10 @@ impl Window {
             }
             let min = [0.0, 5.0, 6.0, 7.0, 8.0][dd.selected() as usize];
             win.imp().min_rating.set(min);
+            // A committed filter closes the popover (the grid behind
+            // re-renders with the new view). The MenuButton must be
+            // deactivated too — popdown() alone leaves it re-shown.
+            win.imp().filter_button.set_active(false);
             if win.imp().selected_category.get() >= 0 {
                 let selected = win.imp().selected_category.get() as usize;
                 win.select_category(selected);
@@ -1936,6 +1940,10 @@ impl Window {
                 None
             };
             *win.imp().genre.borrow_mut() = genre;
+            // A committed filter closes the popover (the grid behind
+            // re-renders with the new view). The MenuButton must be
+            // deactivated too — popdown() alone leaves it re-shown.
+            win.imp().filter_button.set_active(false);
             if win.imp().selected_category.get() >= 0 {
                 let selected = win.imp().selected_category.get() as usize;
                 win.select_category(selected);
@@ -2653,16 +2661,35 @@ impl Window {
         }
         if let Some(panel) = panel_rating.as_deref() {
             // The panel carries its own score — never re-fetch it.
+            tracing::info!(
+                target: "rtv::ui",
+                title = %name, score = %panel,
+                "series rating chip: panel score, no lookup"
+            );
             chips.apply(None, Some(panel));
         } else {
+            tracing::info!(
+                target: "rtv::ui",
+                title = %name, year = ?year,
+                "series rating chip: no panel score, starting internet lookup"
+            );
+            let name_owned = name.to_string();
+            let name2 = name_owned.clone();
             let win = self.downgrade();
-            crate::ratings::lookup(Kind::Series, name, year.as_deref(), move |ratings| {
+            crate::ratings::lookup(Kind::Series, &name_owned, year.as_deref(), move |ratings| {
                 let Some(win) = win.upgrade() else {
                     return;
                 };
                 if win.imp().details_generation.get() != generation {
                     return;
                 }
+                tracing::info!(
+                    target: "rtv::ui",
+                    title = %name2,
+                    imdb = ?ratings.as_ref().and_then(|r| r.imdb.clone()),
+                    imdb_id = ?ratings.as_ref().and_then(|r| r.imdb_id.clone()),
+                    "series rating chip: internet lookup done"
+                );
                 chips.apply(ratings.as_ref(), None);
                 if let Some(ratings) = &ratings {
                     if let Some(section) = &trailer_section {
@@ -2890,34 +2917,28 @@ impl Window {
         // section and the looked up backdrop are shared through slots to
         // connect them.
         let (chips_row, chips) = source_chips_row(name);
+        let chips: Rc<SourceChips> = Rc::new(chips);
         imp.detail_content.append(&chips_row);
         let trailer_section: Rc<RefCell<Option<TrailerSection>>> = Rc::new(RefCell::new(None));
         let backdrop: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let panel_rating = panel_rating.filter(|r| r != "0");
         if let Some(panel) = panel_rating.as_deref() {
             // The panel carries its own score — never re-fetch it.
+            tracing::info!(
+                target: "rtv::ui",
+                title = %name, score = %panel,
+                "movie rating chip: panel score, no lookup"
+            );
             chips.apply(None, Some(panel));
         } else {
-            let win = self.downgrade();
-            crate::ratings::lookup(Kind::Vod, name, year.as_deref(), {
-                let trailer_section = trailer_section.clone();
-                let backdrop = backdrop.clone();
-                move |ratings| {
-                    let Some(win) = win.upgrade() else {
-                        return;
-                    };
-                    if win.imp().details_generation.get() != generation {
-                        return;
-                    }
-                    chips.apply(ratings.as_ref(), None);
-                    if let Some(ratings) = &ratings {
-                        *backdrop.borrow_mut() = ratings.backdrop.clone();
-                        if let Some(section) = &*trailer_section.borrow() {
-                            section.apply_artwork(ratings.backdrop.as_deref());
-                        }
-                    }
-                }
-            });
+            // No panel score in the catalog: get_vod_info (fetched for
+            // this page anyway) may still carry one — the internet
+            // lookup only starts when the panel has nothing at all.
+            tracing::info!(
+                target: "rtv::ui",
+                title = %name, year = ?year,
+                "movie rating chip: no catalog score, deferring to vod info"
+            );
         }
 
         // A little distance from the künye/chips block.
@@ -2941,6 +2962,8 @@ impl Window {
         let title = name.to_string();
         let trailer_section = trailer_section.clone();
         let backdrop = backdrop.clone();
+        let chips = chips.clone();
+        let year = year.clone();
         let source_id = self.active_source_id();
         details::vod_info(source_id, id, move |result| {
             let Some(win) = win.upgrade() else {
@@ -2949,6 +2972,67 @@ impl Window {
             let i = win.imp();
             if i.details_generation.get() != generation {
                 return;
+            }
+            // Panel-first rating rule, stage 2: with no catalog score,
+            // get_vod_info's own rating (still panel data) wins before
+            // the internet lookup starts.
+            if panel_rating.is_none() {
+                let info_rating = result
+                    .as_ref()
+                    .and_then(|v| v.rating.clone())
+                    .filter(|r| !r.trim().is_empty() && r != "0");
+                match info_rating {
+                    Some(score) => {
+                        tracing::info!(
+                            target: "rtv::ui",
+                            title = %title, score = %score,
+                            "movie rating chip: panel score (vod info), no lookup"
+                        );
+                        chips.apply(None, Some(&score));
+                    }
+                    None => {
+                        tracing::info!(
+                            target: "rtv::ui",
+                            title = %title, year = ?year,
+                            "movie rating chip: panel has no score, starting internet lookup"
+                        );
+                        let win2 = win.downgrade();
+                        let trailer_section = trailer_section.clone();
+                        let backdrop = backdrop.clone();
+                        let chips = chips.clone();
+                        let title2 = title.clone();
+                        let year2 = year.clone();
+                        let lookup_name = title2.clone();
+                        let lookup_year = year2.clone();
+                        crate::ratings::lookup(
+                            Kind::Vod,
+                            &lookup_name,
+                            lookup_year.as_deref(),
+                            move |ratings| {
+                                let Some(win) = win2.upgrade() else {
+                                    return;
+                                };
+                                if win.imp().details_generation.get() != generation {
+                                    return;
+                                }
+                                tracing::info!(
+                                    target: "rtv::ui",
+                                    title = %title2,
+                                    imdb = ?ratings.as_ref().and_then(|r| r.imdb.clone()),
+                                    imdb_id = ?ratings.as_ref().and_then(|r| r.imdb_id.clone()),
+                                    "movie rating chip: internet lookup done"
+                                );
+                                chips.apply(ratings.as_ref(), None);
+                                if let Some(ratings) = &ratings {
+                                    *backdrop.borrow_mut() = ratings.backdrop.clone();
+                                    if let Some(section) = &*trailer_section.borrow() {
+                                        section.apply_artwork(ratings.backdrop.as_deref());
+                                    }
+                                }
+                            },
+                        );
+                    }
+                }
             }
             win.fill_vod_details(id, &title, &info_col, result, &trailer_section, &backdrop);
         });
@@ -2981,6 +3065,7 @@ impl Window {
         };
 
         for (key, value) in [
+            info.rating.clone().map(|v| ("Rating", v)),
             info.genre.map(|v| ("Genre", v)),
             info.release_date.map(|v| ("Released", v)),
             info.cast.map(|v| ("Cast", v)),

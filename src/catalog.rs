@@ -81,9 +81,12 @@ impl Item {
     }
 }
 
-/// Parse a panel rating like "6.5" (0.0..=10.0, one decimal).
+/// Parse a panel rating: "6.5", "6,5" (comma decimal), "6.5/10" —
+/// 0.0..=10.0 or nothing.
 fn parse_rating(text: &str) -> Option<f32> {
-    let value: f32 = text.trim().parse().ok()?;
+    let text = text.trim();
+    let text = text.strip_suffix("/10").unwrap_or(text);
+    let value: f32 = text.replace(",", ".").parse().ok()?;
     (0.0..=10.0).contains(&value).then_some(value)
 }
 
@@ -455,6 +458,11 @@ mod tests {
         let mut it = item(Kind::Vod, 1, "V");
         it.rating = Some("7.4".into());
         assert_eq!(it.rating_value(), Some(7.4));
+        // Comma decimals and "x/10" suffixes parse too.
+        it.rating = Some("6,3".into());
+        assert_eq!(it.rating_value(), Some(6.3));
+        it.rating = Some("8.1/10".into());
+        assert_eq!(it.rating_value(), Some(8.1));
         it.rating = Some("11".into());
         assert_eq!(it.rating_value(), None);
         it.rating = Some("none".into());

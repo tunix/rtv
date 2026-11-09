@@ -103,14 +103,26 @@ pub fn lookup(
 ) {
     let key = cache_key(kind, name, year);
     if let Some(ratings) = MEM_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        tracing::debug!(
+            target: "rtv::ratings", title = %name, "ratings lookup: memory cache hit"
+        );
         done(Some(ratings));
         return;
     }
     if let Some(ratings) = read_cache(&key) {
         MEM_CACHE.with(|c| c.borrow_mut().insert(key, ratings.clone()));
+        tracing::debug!(
+            target: "rtv::ratings", title = %name, "ratings lookup: disk cache hit"
+        );
         done(Some(ratings));
         return;
     }
+
+    tracing::info!(
+        target: "rtv::ratings",
+        title = %name, year = ?year,
+        "ratings lookup: cache miss, querying providers"
+    );
 
     // Mock mode fetches artwork over the network already (covers), so
     // live lookups run there too; offline they fail gracefully.
@@ -189,6 +201,12 @@ fn fetch_chain(
         let suggestion_id = value
             .as_ref()
             .and_then(|v| pick_suggestion(v, &name, &year));
+        tracing::info!(
+            target: "rtv::ratings",
+            title = %name, imdb_id = ?suggestion_id,
+            "ratings: imdb suggestion {}",
+            if suggestion_id.is_some() { "hit" } else { "miss" }
+        );
         match suggestion_id {
             // Step 2a: exact IMDb id — Cinemeta meta by id.
             Some(imdb_id) => {
@@ -300,6 +318,12 @@ fn tvmaze_lookup(
 /// Fire the pending callback with the current state.
 fn fire(done: &Rc<RefCell<Option<DoneCallback>>>, ratings: &Rc<RefCell<Ratings>>) {
     let snapshot = ratings.borrow().clone();
+    tracing::info!(
+        target: "rtv::ratings",
+        imdb = ?snapshot.imdb, imdb_id = ?snapshot.imdb_id,
+        backdrop = snapshot.backdrop.is_some(),
+        "ratings lookup finished"
+    );
     if let Some(done) = done.borrow_mut().take() {
         done(Some(snapshot));
     }

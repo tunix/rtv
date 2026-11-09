@@ -313,7 +313,7 @@ fn parse_series_list(list: &[Value]) -> (Vec<Item>, Vec<(i64, SeriesMeta)>) {
             },
         ));
     }
-    let items = list
+    let items: Vec<Item> = list
         .iter()
         .filter_map(|s| {
             let id = s.get("series_id").and_then(Value::as_i64)?;
@@ -342,6 +342,10 @@ fn parse_series_list(list: &[Value]) -> (Vec<Item>, Vec<(i64, SeriesMeta)>) {
             })
         })
         .collect();
+    let total = items.len();
+    let with_year = items.iter().filter(|it| it.year.is_some()).count();
+    let with_rating = items.iter().filter(|it| it.rating.is_some()).count();
+    tracing::info!(target: "rtv::ingest", total, with_year, with_rating, "series titles parsed");
     (items, meta)
 }
 
@@ -351,7 +355,8 @@ fn parse_series_list(list: &[Value]) -> (Vec<Item>, Vec<(i64, SeriesMeta)>) {
 /// carries both) so listings show "Name (year)" and the score rides
 /// the rating field; live names stay verbatim.
 fn parse_stream_list(list: &[Value], kind: Kind) -> Vec<Item> {
-    list.iter()
+    let items: Vec<Item> = list
+        .iter()
         .filter_map(|s| {
             let id = s.get("stream_id").and_then(Value::as_i64).or_else(|| {
                 s.get("stream_id")
@@ -371,7 +376,8 @@ fn parse_stream_list(list: &[Value], kind: Kind) -> Vec<Item> {
                 .and_then(Value::as_str)
                 .filter(|r| !r.is_empty() && *r != "null" && *r != "0")
                 .map(str::to_string);
-            Some(Item {
+            let raw_name = name.clone();
+            let item = Item {
                 kind,
                 id,
                 category_id,
@@ -384,9 +390,36 @@ fn parse_stream_list(list: &[Value], kind: Kind) -> Vec<Item> {
                     .map(str::to_string),
                 rating: name_rating.or(panel_rating),
                 url: None,
-            })
+            };
+            if kind == Kind::Vod {
+                tracing::debug!(
+                    target: "rtv::ingest",
+                    raw = %raw_name, panel_title = ?title,
+                    name = %item.name, year = ?item.year, rating = ?item.rating,
+                    "vod title parsed"
+                );
+            }
+            Some(item)
         })
-        .collect()
+        .collect();
+    if kind == Kind::Vod {
+        let total = items.len();
+        let with_year = items.iter().filter(|it| it.year.is_some()).count();
+        let with_rating = items.iter().filter(|it| it.rating.is_some()).count();
+        let unparsed: Vec<String> = items
+            .iter()
+            .filter(|it| it.year.is_none() && it.rating.is_none())
+            .take(8)
+            .map(|it| it.name.clone())
+            .collect();
+        tracing::info!(
+            target: "rtv::ingest",
+            total, with_year, with_rating,
+            unparsed_samples = ?unparsed,
+            "vod titles parsed"
+        );
+    }
+    items
 }
 
 /// Merge parsed sections into a Catalog. Items referencing categories
