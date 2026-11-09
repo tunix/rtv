@@ -313,17 +313,20 @@ fn parse_series_list(list: &[Value]) -> (Vec<Item>, Vec<(i64, SeriesMeta)>) {
             },
         ));
     }
-    let items = list
+    let items: Vec<Item> = list
         .iter()
         .filter_map(|s| {
             let id = s.get("series_id").and_then(Value::as_i64)?;
             let category_id = s.get("category_id").and_then(Value::as_str)?.to_string();
-            let name = s.get("name").and_then(Value::as_str)?.to_string();
+            let raw_name = s.get("name").and_then(Value::as_str)?.to_string();
+            let title = s.get("title").and_then(Value::as_str);
+            let (name, year, name_rating) = crate::catalog::best_title(&raw_name, title);
             Some(Item {
                 kind: Kind::Series,
                 id,
                 category_id,
                 name,
+                year,
                 icon: s
                     .get("cover")
                     .and_then(Value::as_str)
@@ -333,17 +336,27 @@ fn parse_series_list(list: &[Value]) -> (Vec<Item>, Vec<(i64, SeriesMeta)>) {
                     .get("rating")
                     .and_then(Value::as_str)
                     .filter(|r| !r.is_empty() && *r != "0" && *r != "null")
-                    .map(str::to_string),
+                    .map(str::to_string)
+                    .or(name_rating),
                 url: None,
             })
         })
         .collect();
+    let total = items.len();
+    let with_year = items.iter().filter(|it| it.year.is_some()).count();
+    let with_rating = items.iter().filter(|it| it.rating.is_some()).count();
+    tracing::info!(target: "rtv::ingest", total, with_year, with_rating, "series titles parsed");
     (items, meta)
 }
 
 /// Parse a live/vod stream array (stream_id + category_id + name).
+/// VOD names often embed "| <year> [| <rating> | tags…]" — best_title
+/// peels them (preferring a clean name/title field when the panel
+/// carries both) so listings show "Name (year)" and the score rides
+/// the rating field; live names stay verbatim.
 fn parse_stream_list(list: &[Value], kind: Kind) -> Vec<Item> {
-    list.iter()
+    let items: Vec<Item> = list
+        .iter()
         .filter_map(|s| {
             let id = s.get("stream_id").and_then(Value::as_i64).or_else(|| {
                 s.get("stream_id")
@@ -352,21 +365,61 @@ fn parse_stream_list(list: &[Value], kind: Kind) -> Vec<Item> {
             })?;
             let category_id = s.get("category_id").and_then(Value::as_str)?.to_string();
             let name = s.get("name").and_then(Value::as_str)?.to_string();
-            Some(Item {
+            let title = s.get("title").and_then(Value::as_str);
+            let (name, year, name_rating) = if kind == Kind::Vod {
+                crate::catalog::best_title(&name, title)
+            } else {
+                (name, None, None)
+            };
+            let panel_rating = s
+                .get("rating")
+                .and_then(Value::as_str)
+                .filter(|r| !r.is_empty() && *r != "null" && *r != "0")
+                .map(str::to_string);
+            let raw_name = name.clone();
+            let item = Item {
                 kind,
                 id,
                 category_id,
                 name,
+                year,
                 icon: s
                     .get("stream_icon")
                     .and_then(Value::as_str)
                     .filter(|c| !c.is_empty() && *c != "null")
                     .map(str::to_string),
-                rating: None,
+                rating: name_rating.or(panel_rating),
                 url: None,
-            })
+            };
+            if kind == Kind::Vod {
+                tracing::debug!(
+                    target: "rtv::ingest",
+                    raw = %raw_name, panel_title = ?title,
+                    name = %item.name, year = ?item.year, rating = ?item.rating,
+                    "vod title parsed"
+                );
+            }
+            Some(item)
         })
-        .collect()
+        .collect();
+    if kind == Kind::Vod {
+        let total = items.len();
+        let with_year = items.iter().filter(|it| it.year.is_some()).count();
+        let with_rating = items.iter().filter(|it| it.rating.is_some()).count();
+        let unparsed: Vec<String> = items
+            .iter()
+            .filter(|it| it.year.is_none() && it.rating.is_none())
+            .take(8)
+            .map(|it| it.name.clone())
+            .collect();
+        tracing::info!(
+            target: "rtv::ingest",
+            total, with_year, with_rating,
+            unparsed_samples = ?unparsed,
+            "vod titles parsed"
+        );
+    }
+    items
 }
 
 /// Merge parsed sections into a Catalog. Items referencing categories
@@ -434,6 +487,7 @@ fn build_m3u_catalog(entries: &[xtream::M3UEntry]) -> Catalog {
                 id: next_id,
                 category_id: id.clone(),
                 name: entry.name.clone(),
+                year: None,
                 icon: None,
                 rating: None,
                 url: Some(entry.url.clone()),
@@ -570,6 +624,70 @@ mod tests {
     // ---- parse_stream_list ----
 
     #[test]
+    fn parse_vod_peels_year_and_rating_from_names() {
+        let raw = vec![
+            json!({"stream_id": 10, "category_id": "V1", "name": "Son Damla | 2025 | 6.5"}),
+            json!({"stream_id": 20, "category_id": "V1", "name": "GTA VI | 2026"}),
+            json!({"stream_id": 30, "category_id": "V1", "name": "Plain Movie", "rating": "0"}),
+            json!({"stream_id": 40, "category_id": "V1", "name": "Rated Movie", "rating": "7.2"}),
+        ];
+        let items = parse_stream_list(&raw, Kind::Vod);
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0].name, "Son Damla");
+        assert_eq!(items[0].year.as_deref(), Some("2025"));
+        assert_eq!(items[0].rating.as_deref(), Some("6.5"));
+        assert_eq!(items[1].name, "GTA VI");
+        assert_eq!(items[1].year.as_deref(), Some("2026"));
+        assert_eq!(items[1].rating, None);
+        // No name-embedded rating and the panel's own rating is "0"
+        // (absent) — the rating stays unset.
+        assert_eq!(items[2].rating, None);
+        assert_eq!(items[2].year, None);
+        // The panel's own rating fills in when the name carries none.
+        assert_eq!(items[3].rating.as_deref(), Some("7.2"));
+        assert_eq!(items[3].display_name(), "Rated Movie");
+    }
+
+    #[test]
+    fn parse_vod_prefers_a_clean_title_field() {
+        // The panel keeps a clean `title` and a decorated `name`.
+        let raw = vec![json!({
+            "stream_id": 10, "category_id": "V1",
+            "name": "Bursa Bülbülü | 2023 | 7.0 | DSNP | 4K",
+            "title": "Bursa Bülbülü",
+            "rating": "0"
+        })];
+        let items = parse_stream_list(&raw, Kind::Vod);
+        assert_eq!(items[0].name, "Bursa Bülbülü");
+        assert_eq!(items[0].year.as_deref(), Some("2023"));
+        assert_eq!(items[0].rating.as_deref(), Some("7.0"));
+        assert_eq!(items[0].display_name(), "Bursa Bülbülü (2023)");
+    }
+
+    #[test]
+    fn parse_series_uses_the_title_field_when_cleaner() {
+        let raw = vec![json!({
+            "series_id": 7001, "category_id": "S1",
+            "name": "Heartstopper | 2026 | 7.0",
+            "title": "Heartstopper: Sonsuza Dek",
+            "rating": "0"
+        })];
+        let (items, _) = parse_series_list(&raw);
+        assert_eq!(items[0].name, "Heartstopper: Sonsuza Dek");
+        assert_eq!(items[0].year.as_deref(), Some("2026"));
+        assert_eq!(items[0].rating.as_deref(), Some("7.0"));
+    }
+
+    #[test]
+    fn parse_live_keeps_names_verbatim() {
+        let raw = vec![json!({"stream_id": 10, "category_id": "L1", "name": "beIN | HD"})];
+        let items = parse_stream_list(&raw, Kind::Live);
+        assert_eq!(items[0].name, "beIN | HD");
+        assert_eq!(items[0].year, None);
+        assert_eq!(items[0].rating, None);
+    }
+
+    #[test]
     fn parse_streams_accepts_numeric_and_string_ids() {
         let raw = vec![
             json!({"stream_id": 10, "category_id": "L1", "name": "Numeric"}),
@@ -647,6 +765,7 @@ mod tests {
             id,
             category_id: cat.into(),
             name: format!("item {id}"),
+            year: None,
             icon: None,
             rating: None,
             url: None,

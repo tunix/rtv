@@ -1,0 +1,3965 @@
+use adw::prelude::*;
+use gtk::{gio, glib};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use gstreamer::prelude::*;
+
+use crate::catalog::{Catalog, Category, Item, Kind, SeriesMeta};
+use crate::details::{self, Episode, SeriesInfo};
+use crate::ui::sources::SettingsUi;
+
+/// Search results are capped so a one-letter query cannot flood the grid;
+/// the backend phase will replace this with real incremental search.
+const SEARCH_CAP: usize = 500;
+/// Cards appended to a grid per idle tick (progressive rendering).
+const FILL_CHUNK: usize = 40;
+
+/// Identifies one favorite: kind + catalog id, so same-named content in
+/// different sections never collides. The name rides along for display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FavKey {
+    pub kind: Kind,
+    pub id: i64,
+    pub name: String,
+}
+
+/// What the series detail and episodes pages need to render the shared
+/// header, kept together so both pages can show the same top section.
+#[derive(Debug, Clone)]
+pub struct SeriesCtx {
+    pub id: i64,
+    pub name: String,
+    pub cover: Option<String>,
+    pub meta: SeriesMeta,
+}
+
+/// Sidebar section header row: icon + bold label, click toggles collapse.
+#[derive(Debug)]
+pub struct HeaderRow {
+    row: gtk::ListBoxRow,
+    /// Bold count label ("Live TV (5)"), refreshed on every search change.
+    label: gtk::Label,
+    kind: Kind,
+}
+
+/// Sidebar category row: activating it shows the category's content grid.
+#[derive(Debug)]
+pub struct CategoryRow {
+    row: gtk::ListBoxRow,
+    category_index: usize,
+    group: i32,
+    /// Count label ("News (7)"), refreshed on every search change.
+    label: gtk::Label,
+}
+
+glib::wrapper! {
+    pub struct Window(ObjectSubclass<imp::Window>)
+        @extends adw::ApplicationWindow, gtk::ApplicationWindow, gtk::Window, gtk::Widget,
+        @implements gio::ActionGroup, gio::ActionMap, gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget, gtk::Native, gtk::Root, gtk::ShortcutManager;
+}
+
+mod imp {
+    use adw::subclass::prelude::*;
+    use gtk::{glib, TemplateChild};
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    /// Per-source catalog snapshot lookup installed by the settings dialog.
+    pub type SnapshotProviderCell =
+        RefCell<Option<Box<dyn Fn(u64) -> Option<std::rc::Rc<Catalog>>>>>;
+
+    /// Wrapper silencing Debug on the inner value (fields of a
+    /// `#[derive(Debug)]` CompositeTemplate must all be Debug).
+    pub struct DebugExcluded<T>(pub T);
+
+    impl<T> std::ops::Deref for DebugExcluded<T> {
+        type Target = T;
+        fn deref(&self) -> &T {
+            &self.0
+        }
+    }
+
+    impl<T> std::fmt::Debug for DebugExcluded<T> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("<closure>")
+        }
+    }
+
+    impl<T: Default> Default for DebugExcluded<T> {
+        fn default() -> Self {
+            Self(T::default())
+        }
+    }
+
+    use super::{CategoryRow, FavKey, HeaderRow};
+    use crate::catalog::Catalog;
+    use crate::ui::sources::{SettingsUi, SourcesModel};
+
+    #[derive(Debug, Default, gtk::CompositeTemplate)]
+    #[template(resource = "/io/github/tunix/rtv/window.ui")]
+    pub struct Window {
+        #[template_child]
+        pub toast_overlay: TemplateChild<adw::ToastOverlay>,
+        #[template_child]
+        pub main_view: TemplateChild<adw::NavigationView>,
+        #[template_child]
+        pub welcome_page: TemplateChild<adw::NavigationPage>,
+        #[template_child]
+        pub welcome_status: TemplateChild<adw::StatusPage>,
+        #[template_child]
+        pub browse_page: TemplateChild<adw::NavigationPage>,
+        #[template_child]
+        pub player_page: TemplateChild<adw::NavigationPage>,
+        #[template_child]
+        pub dropdown_box: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub menu_button: TemplateChild<gtk::MenuButton>,
+        #[template_child]
+        pub search_entry: TemplateChild<gtk::SearchEntry>,
+        #[template_child]
+        pub clear_favorites: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub content_list: TemplateChild<gtk::ListBox>,
+        #[template_child]
+        pub player_headerbar: TemplateChild<adw::HeaderBar>,
+        #[template_child]
+        pub player_heart: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub player_content: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub player_box: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub app_watermark: TemplateChild<gtk::Image>,
+        #[template_child]
+        pub video_surface: TemplateChild<gtk::Picture>,
+        #[template_child]
+        pub controls_revealer: TemplateChild<gtk::Revealer>,
+        #[template_child]
+        pub play_button_small: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub seek_back: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub seek_forward: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub scrub_row: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub seek_scale: TemplateChild<gtk::Scale>,
+        #[template_child]
+        pub elapsed_label: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub duration_label: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub mute_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub volume_scale: TemplateChild<gtk::Scale>,
+        #[template_child]
+        pub fullscreen_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub content_info_row: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub live_badge: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub content_stack: TemplateChild<gtk::Stack>,
+        #[template_child]
+        pub content_grid: TemplateChild<gtk::FlowBox>,
+        #[template_child]
+        pub grid_toolbar: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub sort_dropdown: TemplateChild<gtk::DropDown>,
+        #[template_child]
+        pub filter_button: TemplateChild<gtk::MenuButton>,
+        #[template_child]
+        pub favorites_box: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub search_grid: TemplateChild<gtk::FlowBox>,
+        #[template_child]
+        pub favorites_stack: TemplateChild<gtk::Stack>,
+        #[template_child]
+        pub content_title: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub content_status: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub detail_page: TemplateChild<adw::NavigationPage>,
+        #[template_child]
+        pub detail_heart: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub detail_content: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub episodes_page: TemplateChild<adw::NavigationPage>,
+        #[template_child]
+        pub episodes_content: TemplateChild<gtk::Box>,
+
+        /// The catalog snapshot the UI renders from (replaced on ingest).
+        pub catalog: RefCell<Option<std::rc::Rc<Catalog>>>,
+        /// Sidebar rows stay valid only for the snapshot they were built
+        /// from; bumped on every apply_catalog so stale row activations
+        /// no-op instead of indexing into the wrong snapshot.
+        pub catalog_generation: Cell<u64>,
+        /// UI state.
+        pub playing: Cell<bool>,
+        pub muted: Cell<bool>,
+        pub has_source: Cell<bool>,
+        pub on_player: Cell<bool>,
+        /// Whether the current playback target is live TV (drives the
+        /// LIVE badge).
+        pub is_live: Cell<bool>,
+        /// Active GStreamer pipeline for real playback (trailers); None
+        /// means the demo player is on screen.
+        pub pipeline: RefCell<Option<gstreamer::Element>>,
+        pub selected_category: Cell<i32>,
+        /// Grid view state for the Series/Movies toolbars: the sort
+        /// order, the min-rating filter (0.0 = off) and the genre
+        /// filter (None = off). Re-applied on every category selection.
+        pub grid_sort: Cell<crate::catalog::Sort>,
+        pub min_rating: Cell<f32>,
+        pub genre: RefCell<Option<String>>,
+        /// Guards the toolbar handlers while select_category resyncs the
+        /// genre model (the programmatic selection changes must not
+        /// re-trigger a re-render).
+        pub applying_view: Cell<bool>,
+        /// The genre DropDown's selection model; its StringList content
+        /// is spliced in place per category (swapping the model would
+        /// desync the DropDown's own `selected` property).
+        pub genre_model: RefCell<Option<gtk::SingleSelection>>,
+        /// The genre list's item storage (spliced in place by sync).
+        pub genre_list: RefCell<Option<gtk::StringList>>,
+        /// The filter popover and its genre row (the row's visibility
+        /// follows the active content kind — series only).
+        pub filter_popover: RefCell<Option<(gtk::Popover, gtk::Box)>>,
+        /// Harvested movie genres: vod id -> "Genre A, Genre B". Filled
+        /// by the background get_vod_info harvest (each detail fetch is
+        /// already cached on disk, so repeated sessions fill fast).
+        pub vod_genre: RefCell<HashMap<i64, String>>,
+        /// Bumped when a new harvest starts; stale harvest callbacks
+        /// (leftover chain from a previous category) no-op.
+        pub harvest_generation: Cell<u64>,
+        pub last_pointer: Cell<(f64, f64)>,
+        pub favorites: RefCell<Vec<FavKey>>,
+        /// What the player page is showing, so the heart button can
+        /// favorite the CHANNEL / MOVIE / SERIES — never an episode.
+        pub current: RefCell<Option<FavKey>>,
+        /// Status line for the playback screen, restored on play/pause.
+        pub current_status: RefCell<String>,
+        /// The series/movie currently open on the detail page, for the
+        /// headerbar heart.
+        pub detail_target: RefCell<Option<FavKey>>,
+        pub collapsed: RefCell<Vec<bool>>,
+        pub query: RefCell<String>,
+        pub categories: RefCell<Vec<CategoryRow>>,
+        pub headers: RefCell<Vec<HeaderRow>>,
+        /// Pinned "Favorites" sidebar row's bold count label
+        /// ("Favorites (3)"), refreshed by rebuild_favorites.
+        pub favorites_label: RefCell<Option<gtk::Label>>,
+        /// Its row index, used to dispatch row activation before the
+        /// category lookup.
+        pub favorites_row_index: Cell<i32>,
+        pub dropdown: RefCell<Option<gtk::DropDown>>,
+        /// Bumped on every show/cancel; only the timer matching the latest
+        /// generation may hide the controls (stale timers must no-op, since
+        /// `SourceId::remove` panics on already-fired ids).
+        pub controls_generation: Cell<u64>,
+        /// Suppresses the dropdown selection handler while startup
+        /// restores the persisted selection (prevents a double apply).
+        pub restoring_selection: Cell<bool>,
+        /// Bumped whenever the position ticker must be cancelled/replaced.
+        pub position_generation: Cell<u64>,
+        /// Guards the seek-scale sync: true while the ticker writes the
+        /// position programmatically (so user-seek handlers can tell them
+        /// apart).
+        pub scrub_syncing: Cell<bool>,
+        /// Bumped on every grid (re)fill; stale chunk fillers no-op.
+        pub fill_generation: Cell<u64>,
+        /// Bumped on every open_details; stale async detail fillers no-op
+        /// instead of touching a page that already shows other content.
+        pub details_generation: Cell<u64>,
+        /// Configured sources. Shared with the settings dialog.
+        pub sources_model: Rc<SourcesModel>,
+        /// Settings dialog (Sources tab), built lazily and cached for the
+        /// window's lifetime so its navigation stack survives re-opens.
+        pub sources_dialog: RefCell<Option<Rc<SettingsUi>>>,
+        /// Closure handing out per-source catalog snapshots (installed by
+        /// the settings dialog, which owns the model). Debug-excluded —
+        /// closures are opaque.
+        pub snapshot_provider: DebugExcluded<SnapshotProviderCell>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for Window {
+        const NAME: &'static str = "RtvWindow";
+        type Type = super::Window;
+        type ParentType = adw::ApplicationWindow;
+
+        fn class_init(klass: &mut Self::Class) {
+            klass.bind_template();
+        }
+
+        fn instance_init(obj: &glib::subclass::InitializingObject<Self>) {
+            obj.init_template();
+        }
+    }
+
+    impl ObjectImpl for Window {}
+    impl WidgetImpl for Window {}
+    impl WindowImpl for Window {}
+    impl ApplicationWindowImpl for Window {}
+    impl adw::subclass::application_window::AdwApplicationWindowImpl for Window {}
+}
+
+impl Window {
+    pub fn new(app: &adw::Application) -> Self {
+        let window: Window = glib::Object::builder()
+            .property("application", app)
+            .property("icon-name", "io.github.tunix.rtv")
+            .build();
+
+        *window.imp().catalog.borrow_mut() = Some(std::rc::Rc::new(Catalog::default()));
+        // Alt-tab shows the toplevel title; with a header bar title
+        // widget GTK would otherwise fall back to the app id.
+        window.set_title(Some("RTV"));
+        window.setup_actions();
+        window.setup_browse();
+        window.imp().selected_category.set(-1);
+        // Live expanded, Movies/Series collapsed on first open.
+        {
+            let mut collapsed = window.imp().collapsed.borrow_mut();
+            collapsed.clear();
+            collapsed.extend(Kind::SIDEBAR.iter().enumerate().map(|(i, _)| i != 0));
+        }
+        window.refresh_rows_visibility();
+        // Template children of the NavigationView (detail/episodes/player
+        // pages) end up on the stack while the builder constructs the widget
+        // tree, so the window would otherwise open on an empty page. Reset
+        // the stack to the welcome page before anything is shown.
+        window
+            .imp()
+            .main_view
+            .pop_to_page(&*window.imp().welcome_page);
+        window
+    }
+
+    fn imp(&self) -> &imp::Window {
+        glib::subclass::types::ObjectSubclassIsExt::imp(self)
+    }
+
+    /// The catalog snapshot the UI currently renders from. Empty (but
+    /// never None) before any source has been ingested.
+    fn catalog(&self) -> std::rc::Rc<Catalog> {
+        self.imp().catalog.borrow().clone().unwrap_or_default()
+    }
+
+    /// Replace the catalog snapshot and rebuild every view derived from
+    /// it (sidebar, favorites, grids, search). PERF: logs the rebuild
+    /// cost so slow re-renders show up in the record.
+    pub fn apply_catalog(&self, catalog: Catalog) {
+        let started = std::time::Instant::now();
+        *self.imp().catalog.borrow_mut() = Some(std::rc::Rc::new(catalog));
+        self.imp()
+            .catalog_generation
+            .set(self.imp().catalog_generation.get() + 1);
+        // Collapse state refers to section positions, which are stable;
+        // keep it. Selection and grids refer to snapshot indices that no
+        // longer exist — reset them instead of risking out-of-bounds.
+        self.imp().selected_category.set(-1);
+        *self.imp().query.borrow_mut() = String::new();
+        self.imp().search_entry.set_text("");
+        while let Some(child) = self.imp().content_grid.first_child() {
+            self.imp().content_grid.remove(&child);
+        }
+        while let Some(child) = self.imp().search_grid.first_child() {
+            self.imp().search_grid.remove(&child);
+        }
+        // Rebuild sidebar rows from scratch (sections and categories may
+        // have changed wholesale with the new source).
+        while let Some(child) = self.imp().content_list.first_child() {
+            self.imp().content_list.remove(&child);
+        }
+        self.imp().headers.borrow_mut().clear();
+        self.imp().categories.borrow_mut().clear();
+        // Favorites survive (they are keyed by kind+id); rebuild their
+        // icons from the new snapshot and drop ones that no longer exist.
+        {
+            let catalog = self.catalog();
+            self.imp()
+                .favorites
+                .borrow_mut()
+                .retain(|f| catalog.item(f.kind, f.id).is_some());
+        }
+        self.imp().favorites_row_index.set(0);
+        self.setup_sidebar();
+        self.rebuild_favorites();
+        self.refresh_rows_visibility();
+        self.imp().content_stack.set_visible_child_name("empty");
+        tracing::info!(
+            target: "rtv::ui",
+            ms = started.elapsed().as_millis(),
+            "catalog applied — sidebar/favorites rebuilt"
+        );
+    }
+
+    pub fn toast(&self, msg: &str) {
+        self.imp().toast_overlay.add_toast(adw::Toast::new(msg));
+    }
+
+    /// Opens the settings dialog (Sources tab), building it lazily. The
+    /// dialog is cached on the window so its navigation stack survives
+    /// re-opens; the dialog is dropped with the window.
+    fn open_sources_dialog(&self) {
+        let imp = self.imp();
+        let cached = imp.sources_dialog.borrow().as_ref().map(|ui| ui.clone());
+        let dialog = match cached {
+            Some(ui) => ui,
+            None => {
+                let ui = Rc::new(SettingsUi::build(
+                    self.downgrade(),
+                    imp.sources_model.clone(),
+                ));
+                // The dialog owns the sources model; it hands snapshots
+                // to us through this provider so source switching can
+                // re-publish without re-fetching.
+                let model = imp.sources_model.clone();
+                self.install_snapshot_provider(move |id| model.get(id).and_then(|s| s.snapshot));
+                *imp.sources_dialog.borrow_mut() = Some(ui.clone());
+                ui
+            }
+        };
+        dialog.present(self);
+    }
+
+    /// Rebuilds source-dependent UI (dropdown, browse gating) after the
+    /// sources model changed. Publishes the first READY source's
+    /// snapshot if the browse view is still empty, so adding a source
+    /// unlocks browsing with real data.
+    pub fn sync_sources_ui(&self) {
+        let imp = self.imp();
+        let sources = imp.sources_model.all();
+        let has_source = !sources.is_empty();
+        imp.has_source.set(has_source);
+
+        // Dropdown: one entry per source (or the placeholder).
+        let items: Vec<&str> = if sources.is_empty() {
+            vec!["No sources"]
+        } else {
+            sources.iter().map(|s| s.name.as_str()).collect()
+        };
+        // Replacing the DropDown model (or selecting index 0 on a
+        // placeholder-only list) can trip an internal
+        // g_list_store_remove assertion in GTK; guard both calls so the
+        // model is only swapped when it actually changed and selection
+        // is only moved when there is something to select.
+        let dropdown = imp.dropdown.borrow().clone();
+        if let Some(dropdown) = dropdown {
+            let changed = dropdown
+                .model()
+                .map(|m| {
+                    let current: Vec<String> = (0..m.n_items())
+                        .filter_map(|i| {
+                            m.item(i)
+                                .and_then(|o| o.downcast::<gtk::StringObject>().ok())
+                        })
+                        .map(|o| o.string().to_string())
+                        .collect();
+                    current != items.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+                })
+                .unwrap_or(true);
+            if changed {
+                dropdown.set_model(Some(&gtk::StringList::new(&items)));
+            }
+            if has_source {
+                dropdown.set_selected(0);
+            }
+            dropdown.set_sensitive(has_source);
+        }
+    }
+
+    /// Browse the snapshot of the source currently picked in the
+    /// dropdown. Switching sources re-publishes that source's snapshot
+    /// (kept on the source record), falling back to an empty one while
+    /// its ingest is still running.
+    fn show_source_snapshot(&self, source_id: u64) {
+        // The snapshot currently lives in the settings model; fetch it
+        // via the closure the settings dialog installed (see
+        // install_snapshot_provider).
+        let snapshot = self
+            .imp()
+            .snapshot_provider
+            .0
+            .borrow()
+            .as_ref()
+            .and_then(|f| f(source_id));
+        match snapshot {
+            Some(catalog) => {
+                tracing::info!(target: "rtv::ui", id = source_id, "source switch: applying snapshot");
+                self.apply_catalog((*catalog).clone());
+            }
+            None => {
+                tracing::info!(target: "rtv::ui", id = source_id, "source switch: no snapshot yet (still indexing?)");
+                self.apply_catalog(Catalog::default());
+            }
+        }
+    }
+
+    /// Called by the settings dialog after any change: re-syncs the
+    /// dropdown and, when the browse view has no snapshot yet, publishes
+    /// the first ready source's catalog.
+    pub fn on_sources_changed(&self) {
+        self.sync_sources_ui();
+        let sources = self.imp().sources_model.all();
+        if let Some(source) = sources
+            .iter()
+            .find(|s| s.state == crate::ui::sources::SourceState::Ready)
+        {
+            // Only auto-apply when the current snapshot is still empty;
+            // skipped while startup restore is driving the selection
+            // (the restore path applies explicitly).
+            if self.catalog().is_empty() && !self.imp().restoring_selection.get() {
+                self.show_source_snapshot(source.id);
+            }
+        }
+    }
+
+    /// A source was deleted from the settings dialog. Re-syncs the
+    /// dropdown and repairs the browse view: the window renders an
+    /// in-memory snapshot, so the deleted source's categories, grids
+    /// and search results must NOT survive the deletion. With sources
+    /// remaining a survivor takes over (the one the user was browsing,
+    /// else the first ready one); with none left the view clears to
+    /// the intentional empty state and the remembered active source is
+    /// wiped. The per-source catalog and detail caches are already
+    /// gone on disk — store::delete_source removes the source's whole
+    /// data directory.
+    pub fn on_source_deleted(&self, deleted: u64, prev_active: u64) {
+        self.sync_sources_ui();
+        let sources = self.imp().sources_model.all();
+        match crate::ui::sources::delete_handover(&sources, deleted, prev_active) {
+            Some(id) => self.reveal_source(id),
+            None => {
+                tracing::info!(
+                    target: "rtv::ui",
+                    deleted,
+                    "last source deleted — clearing browse snapshot"
+                );
+                crate::store::set_last_source(0);
+                if !self.catalog().is_empty() {
+                    self.apply_catalog(Catalog::default());
+                }
+                // First-launch state: the welcome screen owns the
+                // "Add source" affordance, and browsing an empty world
+                // is pointless. pop_to_page unwinds EVERYTHING stacked
+                // on the welcome page; the pop handler tears the player
+                // down, but pop_to_page's signal granularity is not
+                // guaranteed per page — stop the pipeline explicitly.
+                let imp = self.imp();
+                imp.on_player.set(false);
+                self.cancel_hide();
+                self.stop_pipeline();
+                imp.main_view.pop_to_page(&*imp.welcome_page);
+            }
+        }
+    }
+
+    /// Make `id` the visible source: move the dropdown onto it and
+    /// apply its snapshot. An explicit apply on an unchanged selection
+    /// is REQUIRED, not paranoia: GTK emits no notify when
+    /// `set_selected` keeps the same index, and a deletion that leaves
+    /// the index pointing at the same position is exactly the
+    /// stale-snapshot case this method exists for.
+    fn reveal_source(&self, id: u64) {
+        let imp = self.imp();
+        let Some(position) = imp.sources_model.all().iter().position(|s| s.id == id) else {
+            return;
+        };
+        let Some(dropdown) = imp.dropdown.borrow().clone() else {
+            return;
+        };
+        if dropdown.selected() == position as u32 {
+            crate::store::set_last_source(id);
+            self.show_source_snapshot(id);
+        } else {
+            // The notify handler applies the snapshot + records last_source.
+            dropdown.set_selected(position as u32);
+        }
+    }
+
+    /// Install the closure the settings dialog uses to hand us catalog
+    /// snapshots per source id (the model lives there; the window only
+    /// renders from it).
+    pub fn install_snapshot_provider(
+        &self,
+        provider: impl Fn(u64) -> Option<std::rc::Rc<Catalog>> + 'static,
+    ) {
+        self.imp()
+            .snapshot_provider
+            .0
+            .borrow_mut()
+            .replace(Box::new(provider));
+    }
+
+    /// Visibility toggle from the settings dialog: patches the snapshot
+    /// and re-renders. THE FIX for "removing a category in settings did
+    /// not remove it from the UI": the snapshot is the single source of
+    /// truth the browse view renders from, so patching it immediately
+    /// hides the category everywhere (sidebar rows, grids, search).
+    pub fn set_category_visible(&self, kind: Kind, category_id: &str, visible: bool) {
+        let started = std::time::Instant::now();
+        let catalog = (*self.catalog()).clone();
+        let active = self.active_source_id();
+        let mut changed = false;
+        let mut affected_names: Vec<String> = Vec::new();
+        let mut catalog = catalog;
+        for cat in &mut catalog.categories {
+            if cat.kind == kind && cat.id == category_id {
+                cat.visible = visible;
+                changed = true;
+                affected_names.push(cat.name.clone());
+            }
+        }
+        if !changed {
+            tracing::warn!(target: "rtv::ui", category = category_id, "visibility toggle matched no category");
+            return;
+        }
+        tracing::info!(
+            target: "rtv::ui",
+            category = %affected_names.join(","),
+            visible,
+            "category visibility patched into snapshot"
+        );
+        self.apply_catalog(catalog.clone());
+        if active > 0 {
+            crate::store::persist_category_flags(active, &catalog);
+        }
+        tracing::info!(
+            target: "rtv::ui",
+            ms = started.elapsed().as_millis(),
+            "visibility toggle re-render finished"
+        );
+    }
+
+    /// Bulk All/None for one whole section (the settings dialog's
+    /// bulk-selection feature).
+    pub fn set_section_visible(&self, kind: Kind, visible: bool) {
+        let catalog = (*self.catalog()).clone();
+        let mut catalog = catalog;
+        let mut n = 0usize;
+        for cat in &mut catalog.categories {
+            if cat.kind == kind {
+                cat.visible = visible;
+                n += 1;
+            }
+        }
+        tracing::info!(target: "rtv::ui", kind = ?kind, visible, count = n, "bulk section visibility");
+        self.apply_catalog(catalog);
+    }
+
+    /// Read-only handle to the current snapshot (the settings dialog's
+    /// detail page enumerates categories from it).
+    pub fn catalog_rc(&self) -> std::rc::Rc<Catalog> {
+        self.catalog()
+    }
+
+    /// Background re-ingest of one source (startup refresh path).
+    /// Mirrors the settings dialog's start_ingest pipeline without
+    /// needing the dialog: model update -> ingest::start -> publish.
+    fn background_ingest(&self, id: u64) {
+        let imp = self.imp();
+        let Some(source) = imp.sources_model.get(id) else {
+            return;
+        };
+        tracing::info!(target: "rtv::ingest", id, name = %source.name, "background ingest kicked off");
+        imp.sources_model.update(id, |s| {
+            s.state = crate::ui::sources::SourceState::Indexing;
+            s.failure = None;
+        });
+        self.sync_sources_ui();
+
+        let kind = source.kind.clone();
+        let win_weak = self.downgrade();
+        let model = imp.sources_model.clone();
+        let model2 = imp.sources_model.clone();
+        crate::ingest::start(
+            &kind,
+            move |progress| {
+                model2.update(id, |s| {
+                    s.live_cats = progress.live_cats as u32;
+                    s.live_items = progress.live_items as u32;
+                    s.vod_cats = progress.vod_cats as u32;
+                    s.vod_items = progress.vod_items as u32;
+                    s.series_cats = progress.series_cats as u32;
+                    s.series_items = progress.series_items as u32;
+                });
+            },
+            move |outcome| match outcome {
+                crate::ingest::IngestOutcome::Done(catalog) => {
+                    crate::store::save_catalog(id, &catalog);
+                    let counts = (
+                        catalog.item_count(Kind::Live) as u32,
+                        catalog.item_count(Kind::Vod) as u32,
+                        catalog.item_count(Kind::Series) as u32,
+                    );
+                    let snapshot = std::rc::Rc::new(catalog);
+                    model.update(id, |s| {
+                        s.state = crate::ui::sources::SourceState::Ready;
+                        s.failure = None;
+                        s.snapshot = Some(snapshot.clone());
+                        s.live_cats = snapshot
+                            .categories
+                            .iter()
+                            .filter(|c| c.kind == Kind::Live)
+                            .count() as u32;
+                        s.live_items = counts.0;
+                        s.vod_cats = snapshot
+                            .categories
+                            .iter()
+                            .filter(|c| c.kind == Kind::Vod)
+                            .count() as u32;
+                        s.vod_items = counts.1;
+                        s.series_cats = snapshot
+                            .categories
+                            .iter()
+                            .filter(|c| c.kind == Kind::Series)
+                            .count() as u32;
+                        s.series_items = counts.2;
+                    });
+                    if let Some(win) = win_weak.upgrade() {
+                        let active = win.active_source_id();
+                        if active == id {
+                            // The re-ingested source is the active one:
+                            // publish and, if browsing is still locked
+                            // (welcome screen), unlock it now.
+                            win.apply_catalog((*snapshot).clone());
+                            if !win.browse_unlocked() {
+                                win.unlock_browse();
+                            }
+                        } else if active == 0 {
+                            win.apply_catalog((*snapshot).clone());
+                            win.unlock_browse();
+                        }
+                        win.sync_sources_ui();
+                        win.toast("Source ready — catalog updated");
+                    }
+                    tracing::info!(target: "rtv::ingest", id, "background ingest DONE");
+                }
+                crate::ingest::IngestOutcome::Failed(message) => {
+                    model.update(id, |s| {
+                        s.state = crate::ui::sources::SourceState::Failed;
+                        s.failure = Some(message.clone());
+                        s.snapshot = None;
+                    });
+                    if let Some(win) = win_weak.upgrade() {
+                        win.toast(&format!("Background load failed: {message}"));
+                    }
+                    tracing::error!(target: "rtv::ingest", id, reason = %message, "background ingest FAILED");
+                }
+            },
+        );
+    }
+
+    /// Whether the browse page is already on the navigation stack.
+    pub fn browse_unlocked(&self) -> bool {
+        self.imp()
+            .main_view
+            .visible_page()
+            .map(|page| page == *self.imp().browse_page)
+            .unwrap_or(false)
+    }
+
+    /// Push the browse page (unlock browsing) if still on welcome.
+    pub fn unlock_browse(&self) {
+        let imp = self.imp();
+        imp.has_source.set(true);
+        if let Some(visible) = imp.main_view.visible_page() {
+            if visible == *imp.welcome_page {
+                imp.main_view.push(&*imp.browse_page);
+            }
+        }
+    }
+
+    /// Id of the source currently picked in the dropdown (0 = none).
+    pub fn active_source_id(&self) -> u64 {
+        let imp = self.imp();
+        let index = imp
+            .dropdown
+            .borrow()
+            .as_ref()
+            .map(|d| d.selected())
+            .unwrap_or(0);
+        imp.sources_model
+            .all()
+            .get(index as usize)
+            .map(|s| s.id)
+            .unwrap_or(0)
+    }
+
+    /// STARTUP LOADING (the loading policy from AGENTS.md): render from
+    /// the local cache first. Sources come from sources.json + keyring;
+    /// every stored catalog snapshot is published immediately. The
+    /// last-active source is restored into the dropdown. Sources with
+    /// no stored catalog surface the Retry affordance instead of
+    /// silently refetching with possibly-stale credentials.
+    pub fn load_persisted_state(&self) {
+        let (sources, next_id) = crate::store::load_sources();
+        let imp = self.imp();
+        // Whole-loader suppression: any dropdown/sync triggered apply
+        // during restore would duplicate the explicit one below.
+        imp.restoring_selection.set(true);
+        // The snapshot provider is normally installed by the settings
+        // dialog on first open — but the startup loader needs it EARLIER
+        // (show_source_snapshot during restore). Install it here too;
+        // install_snapshot_provider replaces this when the dialog opens.
+        let model = imp.sources_model.clone();
+        self.install_snapshot_provider(move |id| model.get(id).and_then(|s| s.snapshot));
+        // Detail fetches (series/vod info) ride the ACTIVE source's
+        // credentials; M3U sources have no details API -> None.
+        let model2 = imp.sources_model.clone();
+        let dropdown2 = imp.dropdown.clone();
+        crate::details::install_creds_provider(move || {
+            let index = dropdown2
+                .borrow()
+                .as_ref()
+                .map(|d| d.selected())
+                .unwrap_or(0);
+            model2
+                .all()
+                .get(index as usize)
+                .and_then(|source| match &source.kind {
+                    crate::ui::sources::SourceKind::Xtream {
+                        server,
+                        username,
+                        password,
+                    } => {
+                        let base = crate::ingest::parse_server(server)?;
+                        Some(crate::xtream::XtreamCreds {
+                            base_url: base,
+                            username: username.clone(),
+                            password: password.clone(),
+                        })
+                    }
+                    crate::ui::sources::SourceKind::M3U { .. } => None,
+                })
+        });
+        for source in &sources {
+            imp.sources_model.reserve_ids_through(source.id);
+        }
+        for source in sources {
+            let id = source.id;
+            let mut source = source;
+            if let Some(catalog) = crate::store::load_catalog(id) {
+                source.state = crate::ui::sources::SourceState::Ready;
+                source.live_cats = catalog
+                    .categories
+                    .iter()
+                    .filter(|c| c.kind == Kind::Live)
+                    .count() as u32;
+                source.live_items = catalog.item_count(Kind::Live) as u32;
+                source.vod_cats = catalog
+                    .categories
+                    .iter()
+                    .filter(|c| c.kind == Kind::Vod)
+                    .count() as u32;
+                source.vod_items = catalog.item_count(Kind::Vod) as u32;
+                source.series_cats = catalog
+                    .categories
+                    .iter()
+                    .filter(|c| c.kind == Kind::Series)
+                    .count() as u32;
+                source.series_items = catalog.item_count(Kind::Series) as u32;
+                source.snapshot = Some(std::rc::Rc::new(catalog));
+            } else {
+                source.state = crate::ui::sources::SourceState::Failed;
+                source.failure = Some("Not loaded yet — press Retry to fetch the catalog.".into());
+            }
+            // The model is empty at startup - append, don't replace
+            // (replace() only updates existing entries; a no-op here
+            // silently dropped every loaded source and left the model
+            // empty, which read back as restored_active=false).
+            imp.sources_model.add(|_| source);
+        }
+        imp.sources_model
+            .reserve_ids_through(next_id.saturating_sub(1));
+        self.sync_sources_ui();
+        self.on_sources_changed();
+
+        // Restore the last active source into the dropdown + snapshot.
+        let last = crate::store::last_source();
+        let mut restored_active = false;
+        if last > 0 {
+            let sources = imp.sources_model.all();
+            if let Some(index) = sources.iter().position(|s| s.id == last) {
+                // The dropdown notify handler applies the snapshot only
+                // when the selection CHANGES; on startup it may equal the
+                // restored index (no change, no notify) or fire alongside
+                // the explicit call below (double apply). The restoring
+                // flag collapses both paths to exactly one apply.
+                if let Some(dropdown) = imp.dropdown.borrow().as_ref() {
+                    dropdown.set_selected(index as u32);
+                }
+                self.show_source_snapshot(last);
+                restored_active = true;
+            }
+        }
+        imp.restoring_selection.set(false);
+        // Cache-first launch: with a usable catalog on board, browsing
+        // unlocks immediately instead of parking on the welcome screen.
+        if restored_active && !self.catalog().is_empty() {
+            imp.has_source.set(true);
+            imp.main_view.push(&*imp.browse_page);
+        }
+        // Background refresh (loading policy: never block, always
+        // surface progress): sources WITHOUT a stored catalog re-ingest
+        // now, in the background. Their rows flip to live counters; a
+        // finished ingest publishes its snapshot and heals the source.
+        let win_weak = self.downgrade();
+        let model = imp.sources_model.clone();
+        glib::idle_add_local_once(move || {
+            let Some(win) = win_weak.upgrade() else {
+                return;
+            };
+            for source in model.all() {
+                if crate::store::load_catalog(source.id).is_none() {
+                    tracing::info!(
+                        target: "rtv::store",
+                        id = source.id,
+                        "no stored catalog — background re-ingest"
+                    );
+                    win.background_ingest(source.id);
+                }
+            }
+        });
+        tracing::info!(
+            target: "rtv::store",
+            last_source = last,
+            unlocked_browse = restored_active && !self.catalog().is_empty(),
+            "persisted state loaded"
+        );
+    }
+
+    /// Called when the settings dialog closes: if the user has at least one
+    /// source and is still on the welcome screen, unlock browsing. Without
+    /// a source the welcome screen stays (Add Source again).
+    pub fn on_sources_closed(&self) {
+        let imp = self.imp();
+        self.on_sources_changed();
+        if !imp.has_source.get() {
+            // Zero sources: browsing an empty world is meaningless.
+            // Whatever page we are on (welcome included — pop_to_page
+            // is a no-op then), return to the welcome screen with its
+            // "Add source" affordance. Teardown mirrors the delete path.
+            imp.on_player.set(false);
+            self.cancel_hide();
+            self.stop_pipeline();
+            imp.main_view.pop_to_page(&*imp.welcome_page);
+            return;
+        }
+        let Some(visible) = imp.main_view.visible_page() else {
+            return;
+        };
+        if visible == *imp.welcome_page {
+            imp.main_view.push(&*imp.browse_page);
+        }
+    }
+
+    fn setup_actions(&self) {
+        // Sources are managed in the settings dialog (Sources tab): add,
+        // edit, delete. The dialog keeps its state in-memory; the
+        // backend phase will replace this with real fetching.
+        let win = self.downgrade();
+        let add_source = gio::SimpleAction::new("add-source", None);
+        add_source.connect_activate(move |_, _| {
+            let Some(win) = win.upgrade() else { return };
+            win.open_sources_dialog();
+        });
+        self.add_action(&add_source);
+
+        // Classic media-player shortcuts (accelerators registered in app.rs).
+        // They only act while the player page is on screen. Play/pause
+        // lives on the player page itself (below): a global `space`
+        // accelerator would swallow the space key while typing in the
+        // search entry, so it must stay scoped to the player.
+        let win = self.downgrade();
+        let play_pause = gio::SimpleAction::new("play-pause", None);
+        play_pause.connect_activate(move |_, _| {
+            let Some(win) = win.upgrade() else { return };
+            if win.imp().on_player.get() {
+                win.toggle_playing();
+            }
+        });
+        self.add_action(&play_pause);
+
+        let win = self.downgrade();
+        let seek_back = gio::SimpleAction::new("seek-back", None);
+        seek_back.connect_activate(move |_, _| {
+            let Some(win) = win.upgrade() else { return };
+            if win.imp().on_player.get() {
+                win.seek_relative(-10);
+            }
+        });
+        self.add_action(&seek_back);
+
+        let win = self.downgrade();
+        let seek_forward = gio::SimpleAction::new("seek-forward", None);
+        seek_forward.connect_activate(move |_, _| {
+            let Some(win) = win.upgrade() else { return };
+            if win.imp().on_player.get() {
+                win.seek_relative(10);
+            }
+        });
+        self.add_action(&seek_forward);
+
+        let win = self.downgrade();
+        let mute = gio::SimpleAction::new("toggle-mute", None);
+        mute.connect_activate(move |_, _| {
+            let Some(win) = win.upgrade() else { return };
+            if win.imp().on_player.get() {
+                win.toggle_mute();
+            }
+        });
+        self.add_action(&mute);
+
+        let win = self.downgrade();
+        let fullscreen = gio::SimpleAction::new("toggle-fullscreen", None);
+        fullscreen.connect_activate(move |_, _| {
+            let Some(win) = win.upgrade() else { return };
+            if win.imp().on_player.get() {
+                win.toggle_fullscreen();
+            }
+        });
+        self.add_action(&fullscreen);
+
+        let win = self.downgrade();
+        let exit_fullscreen = gio::SimpleAction::new("exit-fullscreen", None);
+        exit_fullscreen.connect_activate(move |_, _| {
+            let Some(win) = win.upgrade() else { return };
+            if win.is_fullscreen() {
+                win.unfullscreen();
+            } else if !win.imp().query.borrow().trim().is_empty() {
+                // Outside fullscreen, Escape resets the search instead.
+                win.imp().search_entry.set_text("");
+            }
+        });
+        self.add_action(&exit_fullscreen);
+
+        let win = self.downgrade();
+        let settings = gio::SimpleAction::new("settings", None);
+        settings.connect_activate(move |_, _| {
+            let Some(win) = win.upgrade() else { return };
+            win.open_sources_dialog();
+        });
+        self.add_action(&settings);
+
+        let win2 = self.downgrade();
+        let about = gio::SimpleAction::new("about", None);
+        about.connect_activate(move |_, _| {
+            if let Some(win) = win2.upgrade() {
+                let dialog = adw::AboutDialog::new();
+                dialog.set_application_name("RTV");
+                dialog.set_application_icon("io.github.tunix.rtv");
+                dialog.set_version(env!("CARGO_PKG_VERSION"));
+                dialog.set_website("https://github.com/tunix/rtv");
+                dialog.set_developer_name("Alper Kanat");
+                dialog.set_comments("IPTV player for the GNOME desktop");
+                dialog.set_license_type(gtk::License::Gpl30Only);
+                dialog.present(Some(&win));
+            }
+        });
+        self.add_action(&about);
+    }
+
+    fn setup_browse(&self) {
+        let imp = self.imp();
+
+        // Restore the persisted volume into the slider (and the schema
+        // default is 1.0 — full). New pipelines pick it up from the scale.
+        let settings = gio::Settings::new("io.github.tunix.rtv");
+        imp.volume_scale.set_value(settings.double("volume"));
+
+        // Source picker, valhalla-style, in the header title area. The
+        // model is populated by sync_sources_ui() from the sources model;
+        // switching sources re-applies that source's catalog snapshot.
+        let dropdown = gtk::DropDown::new(
+            Some(gtk::StringList::new(&["No sources"])),
+            None::<gtk::Expression>,
+        );
+        imp.dropdown_box.append(&dropdown);
+        imp.dropdown.replace(Some(dropdown.clone()));
+        let win = self.downgrade();
+        dropdown.connect_selected_notify(move |dropdown| {
+            let Some(win) = win.upgrade() else { return };
+            if win.imp().restoring_selection.get() {
+                return; // startup restore applies the snapshot itself
+            }
+            let index = dropdown.selected();
+            let sources = win.imp().sources_model.all();
+            let Some(source) = sources.get(index as usize) else { return };
+            tracing::info!(target: "rtv::ui", id = source.id, name = %source.name, "source selected in dropdown");
+            crate::store::set_last_source(source.id);
+            win.show_source_snapshot(source.id);
+        });
+
+        // Sidebar activation: the Favorites row first, then categories.
+        let win = self.downgrade();
+        imp.content_list.connect_row_activated(move |_, row| {
+            let Some(win) = win.upgrade() else { return };
+            let i = win.imp();
+            if row.index() == i.favorites_row_index.get() {
+                win.show_favorites();
+                return;
+            }
+            let index = row.index();
+            let target = i
+                .categories
+                .borrow()
+                .iter()
+                .find(|c| c.row.index() == index)
+                .map(|c| c.category_index);
+            if let Some(cat_idx) = target {
+                win.select_category(cat_idx);
+            }
+        });
+
+        // "Clear all" empties the favorites at once and syncs the heart
+        // buttons on the player/detail pages, which are the only places
+        // that can still show a now-removed favorite.
+        let win = self.downgrade();
+        imp.clear_favorites.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                let i = win.imp();
+                if i.favorites.borrow().is_empty() {
+                    return;
+                }
+                i.favorites.borrow_mut().clear();
+                if i.current.borrow().is_some() {
+                    set_heart_active(&i.player_heart, false);
+                }
+                if i.detail_target.borrow().is_some() {
+                    set_heart_active(&i.detail_heart, false);
+                }
+                win.rebuild_favorites();
+            }
+        });
+
+        // Grid cards route by content kind, exactly like the favorites grid.
+        let win = self.downgrade();
+        imp.content_grid.connect_child_activated(move |_, child| {
+            if let Some(win) = win.upgrade() {
+                win.route_card(child);
+            }
+        });
+
+        // Sort + filter toolbar for the Series/Movies grids.
+        self.setup_grid_toolbar();
+        let win = self.downgrade();
+        imp.search_grid.connect_child_activated(move |_, child| {
+            if let Some(win) = win.upgrade() {
+                win.route_card(child);
+            }
+        });
+
+        // Search across the whole catalog.
+        let win = self.downgrade();
+        imp.search_entry.connect_search_changed(move |entry| {
+            if let Some(win) = win.upgrade() {
+                win.apply_search(&entry.text());
+            }
+        });
+        // Escape inside the search field resets the search.
+        imp.search_entry.connect_stop_search(move |entry| {
+            entry.set_text("");
+        });
+
+        // When the player or the episodes page pops off, their state is
+        // gone; the player tears down any real pipeline, the episodes
+        // page drops its (cover-fetching) children.
+        let win = self.downgrade();
+        imp.main_view.connect_popped(move |_, popped_page| {
+            let Some(win) = win.upgrade() else { return };
+            let i = win.imp();
+            if popped_page == &*i.player_page {
+                i.on_player.set(false);
+                win.cancel_hide();
+                win.stop_pipeline();
+            }
+            if popped_page == &*i.episodes_page {
+                while let Some(child) = i.episodes_content.first_child() {
+                    i.episodes_content.remove(&child);
+                }
+            }
+        });
+
+        // Player control bar.
+        let win = self.downgrade();
+        imp.play_button_small.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                win.toggle_playing();
+            }
+        });
+        let win = self.downgrade();
+        imp.seek_back.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                win.seek_relative(-10);
+            }
+        });
+        let win = self.downgrade();
+        imp.seek_forward.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                win.seek_relative(10);
+            }
+        });
+        let win = self.downgrade();
+        imp.mute_button.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                win.toggle_mute();
+            }
+        });
+        // Real pipelines take the volume directly from the slider, and
+        // the level persists across sessions via GSettings.
+        let win = self.downgrade();
+        imp.volume_scale.connect_value_changed(move |scale| {
+            if let Some(win) = win.upgrade() {
+                let level = scale.value();
+                let i = win.imp();
+                if let Some(pipeline) = i.pipeline.borrow().as_ref() {
+                    pipeline.set_property("volume", level);
+                }
+                let settings = gio::Settings::new("io.github.tunix.rtv");
+                settings
+                    .set_double("volume", level)
+                    .expect("write volume setting");
+            }
+        });
+        // The scrubber seeks the real pipeline when the user drags or
+        // clicks it. The ticker's programmatic updates don't emit
+        // change_value, so there is no feedback loop.
+        let win = self.downgrade();
+        imp.seek_scale.connect_change_value(move |_, _, value| {
+            if let Some(win) = win.upgrade() {
+                win.seek_to(value as u64);
+            }
+            glib::Propagation::Proceed
+        });
+        let win = self.downgrade();
+        imp.fullscreen_button.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                win.toggle_fullscreen();
+            }
+        });
+        let win = self.downgrade();
+        imp.player_heart.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                // The heart favorites the CHANNEL / MOVIE / SERIES being
+                // played — never an individual episode.
+                let target = win.imp().current.borrow().clone();
+                if let Some(t) = target {
+                    win.toggle_fav(t.kind, t.id, &t.name);
+                }
+            }
+        });
+
+        // The detail-page heart favorites the open series/movie.
+        let win = self.downgrade();
+        imp.detail_heart.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                let target = win.imp().detail_target.borrow().clone();
+                if let Some(t) = target {
+                    win.toggle_fav(t.kind, t.id, &t.name);
+                }
+            }
+        });
+
+        // Play/pause is scoped to the player page so the space key keeps
+        // reaching the search entry everywhere else.
+        let play_shortcut = gtk::Shortcut::new(
+            Some(gtk::KeyvalTrigger::new(
+                gtk::gdk::Key::space,
+                gtk::gdk::ModifierType::empty(),
+            )),
+            Some(gtk::NamedAction::new("win.play-pause")),
+        );
+        let shortcuts = gtk::ShortcutController::new();
+        shortcuts.add_shortcut(play_shortcut);
+        imp.player_content.add_controller(shortcuts);
+
+        // Mouse movement over the player reveals auto-hidden controls.
+        // Real movement only: the sub-pixel "motion" events GTK emits when
+        // overlay widgets reallocate under a stationary pointer must not
+        // re-reveal the controls (they caused a show/hide flap).
+        let motion = gtk::EventControllerMotion::new();
+        let win = self.downgrade();
+        motion.connect_motion(move |_, x, y| {
+            if let Some(win) = win.upgrade() {
+                let i = win.imp();
+                let (lx, ly) = i.last_pointer.get();
+                let moved = (x - lx).abs() > 2.0 || (y - ly).abs() > 2.0;
+                i.last_pointer.set((x, y));
+                if moved && i.playing.get() && i.on_player.get() {
+                    win.show_controls();
+                }
+            }
+        });
+        let win = self.downgrade();
+        motion.connect_enter(move |_, x, y| {
+            if let Some(win) = win.upgrade() {
+                win.imp().last_pointer.set((x, y));
+            }
+        });
+        imp.player_content.add_controller(motion);
+
+        // The fullscreen icon and chrome visibility follow the real window
+        // state. Fullscreen means PURE video: no headerbar, no info row, no
+        // LIVE badge, no margins or rounded corners — chrome comes back
+        // together with the controls on mouse movement.
+        self.connect_fullscreened_notify(|win| {
+            let i = win.imp();
+            let fullscreen = win.is_fullscreen();
+            i.fullscreen_button.set_icon_name(if fullscreen {
+                "view-restore-symbolic"
+            } else {
+                "view-fullscreen-symbolic"
+            });
+            i.player_headerbar.set_visible(!fullscreen);
+            i.content_info_row.set_visible(!fullscreen);
+            i.live_badge.set_visible(!fullscreen && i.is_live.get());
+            let margin = if fullscreen { 0 } else { 12 };
+            i.player_content.set_margin_start(margin);
+            i.player_content.set_margin_end(margin);
+            i.player_content.set_margin_bottom(margin);
+            i.player_content
+                .set_spacing(if fullscreen { 0 } else { 12 });
+            if fullscreen {
+                i.player_box.add_css_class("video-fill");
+            } else {
+                i.player_box.remove_css_class("video-fill");
+            }
+            if fullscreen {
+                win.show_controls();
+            }
+        });
+
+        self.rebuild_favorites();
+    }
+
+    /// Build the sidebar dynamically from the sample catalog: one collapsible
+    /// section per content kind (Live TV, Movies, Series), its categories
+    /// underneath. Headers carry the sub-category count, category rows the
+    /// item count; `refresh_rows_visibility` keeps both in sync with the
+    /// active search query.
+    fn setup_sidebar(&self) {
+        let imp = self.imp();
+
+        // Pinned Favorites row at the very top of the sidebar: always
+        // visible, unaffected by section collapse and search filtering.
+        // Formatted like the main-category headers: icon + bold label.
+        // OWNED by this rebuild (created ONCE in setup_browse before):
+        // apply_catalog wipes every content_list child and re-runs this,
+        // and the one-shot row used to vanish above Live TV from the
+        // first catalog application onward.
+        let favorites_row = gtk::ListBoxRow::new();
+        let favorites_box = gtk::Box::builder().spacing(6).build();
+        favorites_box.append(
+            // Bundled icon: the theme's emblem-favorite-symbolic is missing
+            // in current Adwaita, and the colored fallback renders RED.
+            &gtk::Image::builder()
+                .icon_name("rtv-heart-symbolic")
+                .pixel_size(14)
+                .valign(gtk::Align::Center)
+                .build(),
+        );
+        let favorites_label = gtk::Label::builder()
+            .label("Favorites (0)")
+            .halign(gtk::Align::Start)
+            .css_classes(["heading"])
+            .build();
+        favorites_box.append(&favorites_label);
+        favorites_row.set_child(Some(&favorites_box));
+        imp.content_list.prepend(&favorites_row);
+        imp.favorites_label.replace(Some(favorites_label));
+        imp.favorites_row_index.set(favorites_row.index());
+
+        let catalog = self.catalog();
+
+        for (group, kind) in Kind::SIDEBAR.iter().enumerate() {
+            let group = group as i32;
+            // HIDDEN categories do not render in the sidebar at all — the
+            // settings toggles control visibility end to end (the fix for
+            // "removing a category in settings left it in the UI").
+            let cats: Vec<(usize, &Category)> = catalog
+                .categories
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.kind == *kind && c.visible)
+                .collect();
+
+            let header_label = gtk::Label::builder()
+                .label(format!("{} ({})", kind.title(), cats.len()))
+                .xalign(0.0)
+                .css_classes(["heading"])
+                .build();
+            let header = gtk::ListBoxRow::builder()
+                .activatable(false)
+                .selectable(false)
+                .build();
+            let header_box = gtk::Box::builder().spacing(6).build();
+            header_box.append(
+                &gtk::Image::builder()
+                    .icon_name(kind.icon())
+                    .pixel_size(14)
+                    .valign(gtk::Align::Center)
+                    .build(),
+            );
+            header_box.append(&header_label);
+            header.set_child(Some(&header_box));
+            let win = self.downgrade();
+            let gesture = gtk::GestureClick::new();
+            gesture.connect_pressed(move |_, _, _, _| {
+                if let Some(win) = win.upgrade() {
+                    win.toggle_group(group);
+                }
+            });
+            header.add_controller(gesture);
+            imp.content_list.append(&header);
+            imp.headers.borrow_mut().push(HeaderRow {
+                row: header,
+                label: header_label,
+                kind: *kind,
+            });
+
+            for (cat_index, cat) in cats {
+                let count = catalog
+                    .items
+                    .iter()
+                    .filter(|it| it.kind == *kind && it.category_id == cat.id)
+                    .count();
+                let label = gtk::Label::builder()
+                    .label(format!("{} ({})", cat.name, count))
+                    .halign(gtk::Align::Start)
+                    .ellipsize(gtk::pango::EllipsizeMode::End)
+                    .build();
+                let row = gtk::ListBoxRow::new();
+                // Icon (14px) + spacing (6px) put the header label at 20px;
+                // category rows align their text with it.
+                let row_box = gtk::Box::builder().margin_start(20).build();
+                row_box.append(&label);
+                row.set_child(Some(&row_box));
+                imp.content_list.append(&row);
+                imp.categories.borrow_mut().push(CategoryRow {
+                    row,
+                    category_index: cat_index,
+                    group,
+                    label,
+                });
+            }
+        }
+    }
+
+    fn toggle_group(&self, group: i32) {
+        let imp = self.imp();
+        {
+            let mut collapsed = imp.collapsed.borrow_mut();
+            while collapsed.len() <= group as usize {
+                collapsed.push(false);
+            }
+            collapsed[group as usize] = !collapsed[group as usize];
+        }
+        self.refresh_rows_visibility();
+    }
+
+    fn collapsed(&self, group: i32) -> bool {
+        let imp = self.imp();
+        let c = imp.collapsed.borrow();
+        match c.get(group as usize) {
+            Some(&v) => v,
+            None => false,
+        }
+    }
+
+    fn apply_search(&self, text: &str) {
+        let imp = self.imp();
+        *imp.query.borrow_mut() = text.to_string();
+        self.refresh_rows_visibility();
+
+        let q = text.trim().to_lowercase();
+        if q.is_empty() {
+            if imp.selected_category.get() >= 0 {
+                // The category grid may still hold query-filtered cards —
+                // refill it unfiltered.
+                let selected = imp.selected_category.get() as usize;
+                self.select_category(selected);
+            } else {
+                imp.content_stack.set_visible_child_name("empty");
+            }
+            return;
+        }
+
+        imp.fill_generation.set(imp.fill_generation.get() + 1);
+        while let Some(child) = imp.search_grid.first_child() {
+            imp.search_grid.remove(&child);
+        }
+        let catalog = self.catalog();
+        // Search filters the CURRENT category's content when one is
+        // selected; with no category it spans the whole catalog (cards
+        // then carry their category label). HIDDEN categories are
+        // excluded from search everywhere — that is the whole point of
+        // the visibility toggle.
+        let selected = imp.selected_category.get();
+        let hidden: std::collections::HashSet<(Kind, &str)> = catalog
+            .categories
+            .iter()
+            .filter(|c| !c.visible)
+            .map(|c| (c.kind, c.id.as_str()))
+            .collect();
+        let scope = |it: &Item| {
+            if hidden.contains(&(it.kind, it.category_id.as_str())) {
+                return false;
+            }
+            if selected >= 0 {
+                match catalog.categories.get(selected as usize) {
+                    Some(cat) => it.kind == cat.kind && it.category_id == cat.id,
+                    None => true,
+                }
+            } else {
+                true
+            }
+        };
+        let indices: Vec<usize> = catalog
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| scope(it) && it.name.to_lowercase().contains(&q))
+            .take(SEARCH_CAP)
+            .map(|(i, _)| i)
+            .collect();
+        imp.content_stack.set_visible_child_name("search");
+        self.fill_grid(indices, &imp.search_grid, selected < 0);
+    }
+
+    /// Visibility of every sidebar row, driven by the search query and the
+    /// per-section collapse state — plus the count labels. Search filters
+    /// CONTENT (the middle grid), never the sidebar: every row stays
+    /// visible, but the counts drop to the number of matching items
+    /// (0 when a category has no match).
+    fn refresh_rows_visibility(&self) {
+        let imp = self.imp();
+        let q = imp.query.borrow().trim().to_lowercase();
+
+        {
+            let catalog = self.catalog();
+            // Matching item count per (kind, category id) in one pass.
+            let mut counts: std::collections::HashMap<(Kind, &str), usize> =
+                std::collections::HashMap::new();
+            for it in &catalog.items {
+                if q.is_empty() || it.name.to_lowercase().contains(&q) {
+                    *counts
+                        .entry((it.kind, it.category_id.as_str()))
+                        .or_default() += 1;
+                }
+            }
+
+            for c in imp.categories.borrow().iter() {
+                let count = catalog
+                    .categories
+                    .get(c.category_index)
+                    .and_then(|cat| counts.get(&(cat.kind, cat.id.as_str())))
+                    .copied()
+                    .unwrap_or(0);
+                if let Some(cat) = catalog.categories.get(c.category_index) {
+                    c.label.set_text(&format!("{} ({count})", cat.name));
+                }
+            }
+            // Headers normally show the sub-category count; while
+            // searching, the count of sub-categories that have matches.
+            for h in imp.headers.borrow().iter() {
+                // Hidden categories never render as rows; exclude them from
+                // the header count in every state.
+                let count = if q.is_empty() {
+                    catalog
+                        .categories
+                        .iter()
+                        .filter(|c| c.kind == h.kind && c.visible)
+                        .count()
+                } else {
+                    catalog
+                        .categories
+                        .iter()
+                        .filter(|c| {
+                            c.kind == h.kind
+                                && c.visible
+                                && counts.get(&(c.kind, c.id.as_str())).copied().unwrap_or(0) > 0
+                        })
+                        .count()
+                };
+                h.label.set_text(&format!("{} ({count})", h.kind.title()));
+            }
+        }
+
+        if q.is_empty() {
+            for c in imp.categories.borrow().iter() {
+                c.row.set_visible(!self.collapsed(c.group));
+            }
+            for h in imp.headers.borrow().iter() {
+                h.row.set_visible(true);
+            }
+        } else {
+            for c in imp.categories.borrow().iter() {
+                c.row.set_visible(true);
+            }
+            for h in imp.headers.borrow().iter() {
+                h.row.set_visible(true);
+            }
+        }
+
+        // The pinned Favorites row is not touched: it stays visible in
+        // every collapse and search state.
+    }
+
+    /// Show a category's content as a card grid in the middle pane. An
+    /// active search query keeps filtering within the newly selected
+    /// category.
+    fn select_category(&self, category_index: usize) {
+        let imp = self.imp();
+        imp.selected_category.set(category_index as i32);
+
+        imp.fill_generation.set(imp.fill_generation.get() + 1);
+        while let Some(child) = imp.content_grid.first_child() {
+            imp.content_grid.remove(&child);
+        }
+        let catalog = self.catalog();
+        let Some(cat) = catalog.categories.get(category_index) else {
+            imp.grid_toolbar.set_visible(false);
+            return;
+        };
+        if !cat.visible {
+            // Stale activation against a snapshot where the category was
+            // since hidden — show the empty state instead of leaking the
+            // hidden category's content.
+            tracing::info!(target: "rtv::ui", category = %cat.name, "hidden category activation ignored");
+            imp.content_stack.set_visible_child_name("empty");
+            imp.grid_toolbar.set_visible(false);
+            return;
+        }
+
+        // The toolbar only applies to Series/Movies; Live TV has neither
+        // a year nor a rating to sort or filter on.
+        imp.grid_toolbar.set_visible(cat.kind != Kind::Live);
+        self.sync_genre_model(&catalog, cat);
+        imp.applying_view.set(false);
+
+        let q = imp.query.borrow().trim().to_lowercase();
+        let indices: Vec<usize> = catalog
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| {
+                it.kind == cat.kind
+                    && it.category_id == cat.id
+                    && (q.is_empty() || it.name.to_lowercase().contains(&q))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        // The user's sort + filter view rides on top of the panel order.
+        let vod_genres = imp.vod_genre.borrow();
+        let view = crate::catalog::GridView {
+            items: &catalog.items,
+            series_meta: &catalog.series_meta,
+            vod_genres: &vod_genres,
+            min_rating: {
+                let min = imp.min_rating.get();
+                (min > 0.0).then_some(min)
+            },
+            genre: imp.genre.borrow().clone(),
+            sort: imp.grid_sort.get(),
+        };
+        let indices = view.apply(indices);
+        drop(vod_genres); // the harvest below mutates the genre map
+        imp.content_stack.set_visible_child_name("grid");
+        self.fill_grid(indices, &imp.content_grid, false);
+        // Movies: fill the genre filter in the background (cached
+        // get_vod_info fetches, one at a time).
+        if cat.kind == Kind::Vod {
+            self.harvest_vod_genres(&catalog, cat);
+        }
+    }
+
+    /// Rebuild the filter popover's genre DropDown model from the
+    /// current category's data ("All genres" first): series read their
+    /// genre from the snapshot's inline series metadata, movies from
+    /// the background get_vod_info harvest (`vod_genre`), which keeps
+    /// growing as results land. The programmatic selection changes run
+    /// under `applying_view` — the handlers must not re-render.
+    fn sync_genre_model(&self, catalog: &Catalog, cat: &Category) {
+        let imp = self.imp();
+        imp.applying_view.set(true);
+
+        let genres: Vec<String> = {
+            let mut seen: Vec<String> = catalog
+                .items
+                .iter()
+                .filter(|it| it.kind == cat.kind && it.category_id == cat.id)
+                .filter_map(|it| match cat.kind {
+                    Kind::Series => catalog
+                        .series_meta
+                        .get(&it.id)
+                        .and_then(|m| m.genre.clone()),
+                    Kind::Vod => imp.vod_genre.borrow().get(&it.id).cloned(),
+                    Kind::Live => None,
+                })
+                .flat_map(|g| {
+                    g.split(',')
+                        .map(|p| p.trim().to_string())
+                        .collect::<Vec<String>>()
+                })
+                .filter(|g| !g.is_empty())
+                .collect();
+            seen.sort_by_key(|g| g.to_lowercase());
+            seen.dedup();
+            seen
+        };
+
+        // The genre row shows for series AND movies (movie genres fill
+        // in as the background harvest lands) — hidden for Live TV.
+        let genre_row = imp.filter_popover.borrow().as_ref().map(|p| p.1.clone());
+        if let Some(row) = genre_row {
+            row.set_visible(cat.kind != Kind::Live);
+        }
+
+        let current = imp.genre.borrow().clone();
+        let genre_binding = imp.genre_model.borrow();
+        let list_binding = imp.genre_list.borrow();
+        let (Some(model), Some(list)) = (genre_binding.as_ref(), list_binding.as_ref()) else {
+            imp.applying_view.set(false);
+            return;
+        };
+        // Splice the items IN PLACE: swapping the model under a
+        // DropDown desyncs its own `selected` property (stale index,
+        // wrong label). Splicing keeps one model for the widget's
+        // whole lifetime.
+        let items: Vec<String> = std::iter::once("All genres".to_string())
+            .chain(genres.iter().cloned())
+            .collect();
+        let refs: Vec<&str> = items.iter().map(String::as_str).collect();
+        let old_len = list.n_items();
+        list.splice(0, old_len, &refs);
+        // Keep the active genre selection when the list still carries
+        // it; otherwise the filter resets to "All genres".
+        let target = current
+            .as_ref()
+            .and_then(|g| {
+                genres
+                    .iter()
+                    .position(|x| x.eq_ignore_ascii_case(g))
+                    .map(|p| p as u32 + 1)
+            })
+            .unwrap_or(0);
+        if target == 0 && current.is_some() {
+            *imp.genre.borrow_mut() = None;
+        }
+        model.set_selected(target);
+        // Sync can be called from OUTSIDE select_category (the harvest
+        // callback refreshes the list live) — it must always un-guard
+        // the handlers itself, on every exit path.
+        imp.applying_view.set(false);
+    }
+
+    /// Background harvest of movie genres: fetch get_vod_info for every
+    /// item of the current Movies category that has no genre yet, ONE at
+    /// a time on the main loop (each fetch is memory/disk cached from
+    /// the detail page, so repeat sessions are instant), and store
+    /// `info.genre` into `vod_genre`. Each result refreshes the genre
+    /// dropdown's model, so the filter fills in live. Leaving the
+    /// category (or a catalog refresh) bumps the generation and stops
+    /// the chain.
+    fn harvest_vod_genres(&self, catalog: &Catalog, cat: &Category) {
+        let imp = self.imp();
+        imp.harvest_generation.set(imp.harvest_generation.get() + 1);
+        let generation = imp.harvest_generation.get();
+
+        let pending: Vec<i64> = catalog
+            .items
+            .iter()
+            .filter(|it| it.kind == Kind::Vod && it.category_id == cat.id)
+            .filter(|it| !imp.vod_genre.borrow().contains_key(&it.id))
+            .map(|it| it.id)
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        tracing::info!(
+            target: "rtv::ui",
+            category = %cat.name, count = pending.len(),
+            "vod genre harvest started"
+        );
+        let source_id = self.active_source_id();
+        let queue: Rc<RefCell<Vec<i64>>> = Rc::new(RefCell::new(pending));
+
+        // Sequential driver: each callback pops the next id and fetches
+        // it, keeping exactly one request in flight.
+        fn drive(win: &Window, queue: Rc<RefCell<Vec<i64>>>, generation: u64, source_id: u64) {
+            let next = queue.borrow_mut().pop();
+            let Some(id) = next else {
+                tracing::info!(target: "rtv::ui", generation, "vod genre harvest done");
+                return;
+            };
+            let win_weak = win.downgrade();
+            let queue = queue.clone();
+            details::vod_info(source_id, id, move |result| {
+                let Some(win) = win_weak.upgrade() else {
+                    return;
+                };
+                let imp = win.imp();
+                if imp.harvest_generation.get() != generation {
+                    return; // category changed / catalog replaced
+                }
+                if let Some(genre) = result
+                    .and_then(|i| i.genre)
+                    .filter(|g| !g.trim().is_empty())
+                {
+                    imp.vod_genre.borrow_mut().insert(id, genre);
+                    // Refresh the dropdown's model live; sync runs under
+                    // the guard so the change never re-renders the grid.
+                    if imp.selected_category.get() >= 0 {
+                        let selected = imp.selected_category.get() as usize;
+                        let catalog = win.catalog();
+                        if let Some(cat) = catalog.categories.get(selected) {
+                            if cat.kind == Kind::Vod {
+                                win.sync_genre_model(&catalog, cat);
+                            }
+                        }
+                    }
+                }
+                drive(&win, queue, generation, source_id);
+            });
+        }
+        drive(self, queue, generation, source_id);
+    }
+
+    /// Wire the grid toolbar: the sort DropDown, the min-rating and
+    /// genre DropDowns inside the filter popover. Every change re-runs
+    /// select_category on the active category with the new view state.
+    fn setup_grid_toolbar(&self) {
+        let imp = self.imp();
+
+        imp.sort_dropdown
+            .set_model(Some(&gtk::SingleSelection::new(Some(
+                gtk::StringList::new(&[
+                    "Source order",
+                    "Name (A\u{2013}Z)",
+                    "Year (newest)",
+                    "Rating (highest)",
+                ]),
+            ))));
+        let win = self.downgrade();
+        imp.sort_dropdown.connect_selected_notify(move |_| {
+            let Some(win) = win.upgrade() else { return };
+            let sort = [
+                crate::catalog::Sort::Panel,
+                crate::catalog::Sort::NameAZ,
+                crate::catalog::Sort::YearNewest,
+                crate::catalog::Sort::RatingHighest,
+            ][win.imp().sort_dropdown.selected() as usize];
+            win.imp().grid_sort.set(sort);
+            if win.imp().selected_category.get() >= 0 {
+                let selected = win.imp().selected_category.get() as usize;
+                win.select_category(selected);
+            }
+        });
+
+        // Filter popover: min rating + genre rows, both plain DropDowns.
+        let popover = gtk::Popover::new();
+        let content = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .margin_top(12)
+            .margin_bottom(12)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+
+        content.append(
+            &gtk::Label::builder()
+                .label("Minimum rating")
+                .halign(gtk::Align::Start)
+                .build(),
+        );
+        let rating_list = gtk::StringList::new(&["Any", "5.0+", "6.0+", "7.0+", "8.0+"]);
+        let rating_model = gtk::SingleSelection::new(Some(rating_list));
+        let rating_dd = gtk::DropDown::new(Some(rating_model), None::<gtk::Expression>);
+        content.append(&rating_dd);
+
+        let genre_list = gtk::StringList::new(&["All genres"]);
+        let genre_model = gtk::SingleSelection::new(Some(genre_list.clone()));
+        let genre_dd = gtk::DropDown::new(Some(genre_model.clone()), None::<gtk::Expression>);
+        let genre_row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .build();
+        genre_row.append(
+            &gtk::Label::builder()
+                .label("Genre")
+                .halign(gtk::Align::Start)
+                .build(),
+        );
+        genre_row.append(&genre_dd);
+        content.append(&genre_row);
+
+        popover.set_child(Some(&content));
+        imp.filter_button.set_popover(Some(&popover));
+        *imp.filter_popover.borrow_mut() = Some((popover, genre_row));
+        *imp.genre_model.borrow_mut() = Some(genre_model);
+        *imp.genre_list.borrow_mut() = Some(genre_list);
+
+        let win = self.downgrade();
+        rating_dd.connect_selected_notify(move |dd| {
+            let Some(win) = win.upgrade() else { return };
+            if win.imp().applying_view.get() {
+                return;
+            }
+            let min = [0.0, 5.0, 6.0, 7.0, 8.0][dd.selected() as usize];
+            win.imp().min_rating.set(min);
+            // A committed filter closes the popover (the grid behind
+            // re-renders with the new view).
+            if let Some((popover, _)) = win.imp().filter_popover.borrow().as_ref() {
+                popover.popdown();
+            }
+            if win.imp().selected_category.get() >= 0 {
+                let selected = win.imp().selected_category.get() as usize;
+                win.select_category(selected);
+            }
+        });
+        let win = self.downgrade();
+        genre_dd.connect_selected_notify(move |dd| {
+            let Some(win) = win.upgrade() else { return };
+            if win.imp().applying_view.get() {
+                return;
+            }
+            // Read from the DROPDOWN's own state: its selected position
+            // and item are what the button shows, and they can be
+            // (transiently) ahead of the model during content splices.
+            let genre = if dd.selected() > 0 {
+                dd.selected_item()
+                    .and_then(|o| o.downcast::<gtk::StringObject>().ok())
+                    .map(|o| o.string().to_string())
+            } else {
+                None
+            };
+            *win.imp().genre.borrow_mut() = genre;
+            // A committed filter closes the popover (the grid behind
+            // re-renders with the new view).
+            if let Some((popover, _)) = win.imp().filter_popover.borrow().as_ref() {
+                popover.popdown();
+            }
+            if win.imp().selected_category.get() >= 0 {
+                let selected = win.imp().selected_category.get() as usize;
+                win.select_category(selected);
+            }
+        });
+    }
+
+    /// Fill a grid progressively: FILL_CHUNK cards per idle tick so a
+    /// 1800-card category never blocks the UI. A generation counter makes
+    /// stale fillers (category switch, new search) stop immediately.
+    fn fill_grid(&self, mut indices: Vec<usize>, flowbox: &gtk::FlowBox, with_categories: bool) {
+        let imp = self.imp();
+        imp.fill_generation.set(imp.fill_generation.get() + 1);
+        let generation = imp.fill_generation.get();
+        indices.reverse(); // pop() from the end preserves order
+        let remaining = std::rc::Rc::new(RefCell::new(indices));
+        let flowbox = flowbox.clone();
+        let win = self.downgrade();
+        glib::idle_add_local(move || {
+            let Some(window) = win.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let i = window.imp();
+            if i.fill_generation.get() != generation {
+                return glib::ControlFlow::Break;
+            }
+            let mut rem = remaining.borrow_mut();
+            for _ in 0..FILL_CHUNK {
+                let Some(idx) = rem.pop() else {
+                    return glib::ControlFlow::Break;
+                };
+                let (item, category_label) = {
+                    let catalog_ref = i.catalog.borrow();
+                    let Some(catalog) = catalog_ref.as_ref() else {
+                        continue;
+                    };
+                    let Some(item) = catalog.items.get(idx).cloned() else {
+                        continue;
+                    };
+                    let category_label = with_categories
+                        .then(|| {
+                            catalog
+                                .categories
+                                .iter()
+                                .find(|cat| cat.kind == item.kind && cat.id == item.category_id)
+                                .map(|cat| cat.name.clone())
+                        })
+                        .flatten();
+                    (item, category_label)
+                };
+                flowbox.append(&content_card(&item, category_label.as_deref()));
+            }
+            if rem.is_empty() {
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+    }
+
+    /// Add or remove one favorite, identified by kind + id so same-named
+    /// content across sections never collides. Syncs the player and detail
+    /// page hearts and the whole favorites UI.
+    fn toggle_fav(&self, kind: Kind, id: i64, name: &str) -> bool {
+        let imp = self.imp();
+        let is_fav = {
+            let mut favs = imp.favorites.borrow_mut();
+            if let Some(pos) = favs.iter().position(|f| f.kind == kind && f.id == id) {
+                favs.remove(pos);
+                false
+            } else {
+                favs.push(FavKey {
+                    kind,
+                    id,
+                    name: name.to_string(),
+                });
+                true
+            }
+        };
+        self.rebuild_favorites();
+        if let Some(cur) = imp.current.borrow().as_ref() {
+            if cur.kind == kind && cur.id == id {
+                set_heart_active(&imp.player_heart, is_fav);
+            }
+        }
+        if let Some(target) = imp.detail_target.borrow().as_ref() {
+            if target.kind == kind && target.id == id {
+                set_heart_active(&imp.detail_heart, is_fav);
+            }
+        }
+        is_fav
+    }
+
+    fn is_fav(&self, kind: Kind, id: i64) -> bool {
+        self.imp()
+            .favorites
+            .borrow()
+            .iter()
+            .any(|f| f.kind == kind && f.id == id)
+    }
+
+    /// Switch the middle pane to the favorites view.
+    fn show_favorites(&self) {
+        self.imp().content_stack.set_visible_child_name("favorites");
+    }
+
+    /// Refresh everything favorites-related: the pinned sidebar row label,
+    /// the favorites page (per-kind sections vs. empty status) and the
+    /// "Clear all" sensitivity. Favorite counts are small, so the section
+    /// grids refill synchronously instead of going through the chunk
+    /// filler. Favorites are grouped by main category: one grid each for
+    /// Live TV, Movies and Series, stacked vertically.
+    fn rebuild_favorites(&self) {
+        let imp = self.imp();
+        let favs = imp.favorites.borrow().clone();
+        let count = favs.len();
+
+        if let Some(label) = imp.favorites_label.borrow().as_ref() {
+            label.set_text(&format!("Favorites ({count})"));
+        }
+        imp.clear_favorites.set_sensitive(count > 0);
+        imp.favorites_stack
+            .set_visible_child_name(if count == 0 { "empty" } else { "grid" });
+
+        while let Some(child) = imp.favorites_box.first_child() {
+            imp.favorites_box.remove(&child);
+        }
+        let win = self.downgrade();
+        for kind in Kind::SIDEBAR {
+            let section: Vec<&FavKey> = favs.iter().filter(|f| f.kind == kind).collect();
+            if section.is_empty() {
+                continue;
+            }
+            imp.favorites_box.append(
+                &gtk::Label::builder()
+                    .label(format!("{} ({})", kind.title(), section.len()))
+                    .halign(gtk::Align::Start)
+                    .css_classes(["title-4"])
+                    .build(),
+            );
+
+            let grid = gtk::FlowBox::builder()
+                .column_spacing(12)
+                .row_spacing(12)
+                .min_children_per_line(3)
+                .max_children_per_line(5)
+                .activate_on_single_click(true)
+                .selection_mode(gtk::SelectionMode::None)
+                .valign(gtk::Align::Start)
+                .build();
+            let win = win.clone();
+            grid.connect_child_activated(move |_, child| {
+                if let Some(win) = win.upgrade() {
+                    win.route_card(child);
+                }
+            });
+            for fav in section {
+                // Items are looked up by kind + id; the name is only for
+                // display, so a stale favorite still routes correctly.
+                let found = imp
+                    .catalog
+                    .borrow()
+                    .as_ref()
+                    .and_then(|c| {
+                        c.items
+                            .iter()
+                            .find(|it| it.kind == fav.kind && it.id == fav.id)
+                    })
+                    .map(|it| (it.display_name(), it.icon.clone()));
+                let (name, icon) = found.unwrap_or_else(|| (fav.name.clone(), None));
+                grid.append(&card_body(
+                    &name,
+                    icon.as_deref(),
+                    Some(fav.kind),
+                    Some(fav.id),
+                    None,
+                ));
+            }
+            imp.favorites_box.append(&grid);
+        }
+    }
+
+    /// Card activation routes by the content kind the card carries:
+    /// Live -> playback, Series/Movies -> the detail page.
+    fn route_card(&self, child: &gtk::FlowBoxChild) {
+        let catalog = self.catalog();
+        if let (Some(kind), Some(id)) = (card_kind(child), card_id(child)) {
+            if let Some(item) = catalog.item(kind, id) {
+                match kind {
+                    Kind::Live => self.play(kind, id, &item.name),
+                    Kind::Series | Kind::Vod => self.open_details(kind, id, &item.name),
+                }
+                return;
+            }
+        }
+        // Fallback: cards without kind data resolve by their title.
+        if let Some(name) = card_name(child) {
+            if let Some(item) = catalog.items.iter().find(|it| it.display_name() == name) {
+                match item.kind {
+                    Kind::Live => self.play(item.kind, item.id, &item.name),
+                    Kind::Series | Kind::Vod => self.open_details(item.kind, item.id, &item.name),
+                }
+            }
+        }
+    }
+
+    fn play(&self, kind: Kind, id: i64, name: &str) {
+        // Real playback. M3U entries carry their OWN url (per-entry);
+        // Xtream items get one composed from the active source's
+        // credentials (never logged). With neither, the demo player
+        // stands in.
+        let catalog = self.catalog();
+        let item_url = catalog.item(kind, id).and_then(|it| it.url.clone());
+        let url = item_url.or_else(|| {
+            self.active_source_creds()
+                .map(|creds| creds.stream_url(kind, id, "ts"))
+        });
+        let status = match (&url, kind) {
+            (Some(_), Kind::Live) => "Live · playing from source",
+            (Some(_), Kind::Vod) => "Movie · playing from source",
+            (Some(_), Kind::Series) => "Series",
+            (None, Kind::Live) => "Live · 1080p",
+            (None, Kind::Vod) => "Movie · 1080p",
+            (None, Kind::Series) => "Series",
+        };
+        self.play_with_status(kind, id, name, name, status);
+        if let Some(url) = url {
+            tracing::info!(target: "rtv::play", kind = ?kind, id, "playback URL composed (credentials not logged)");
+            if self.start_playback(&url) {
+                self.imp().playing.set(true);
+                self.set_play_icon(true);
+            } else {
+                tracing::warn!(target: "rtv::play", "GStreamer pipeline failed to start — demo player shown");
+                self.toast("Real playback is unavailable here — the demo player shows instead");
+            }
+        }
+    }
+
+    /// Credentials of the source picked in the dropdown (for playback
+    /// URL composition). M3U sources return None — their entries carry
+    /// their own URLs in the playlist (wired in a later round).
+    fn active_source_creds(&self) -> Option<crate::xtream::XtreamCreds> {
+        let imp = self.imp();
+        let index = imp.dropdown.borrow().as_ref()?.selected();
+        let sources = imp.sources_model.all();
+        let source = sources.get(index as usize)?;
+        match &source.kind {
+            crate::ui::sources::SourceKind::Xtream {
+                server,
+                username,
+                password,
+            } => {
+                let base = crate::ingest::parse_server(server)?;
+                Some(crate::xtream::XtreamCreds {
+                    base_url: base,
+                    username: username.clone(),
+                    password: password.clone(),
+                })
+            }
+            crate::ui::sources::SourceKind::M3U { .. } => None,
+        }
+    }
+
+    /// Playing an episode keeps the HEART on the parent series: the
+    /// favorite target is the series, the title only names the episode.
+    fn play_episode(
+        &self,
+        series_id: i64,
+        series_name: &str,
+        season: i64,
+        episode_number: i64,
+        episode_title: &str,
+    ) {
+        // The favorite target stays the SERIES; the player page names
+        // the episode and the status line locates it in the series.
+        self.play_with_status(
+            Kind::Series,
+            series_id,
+            series_name,
+            episode_title,
+            &format!("Episode · {series_name} · Season {season} · E{episode_number}"),
+        );
+    }
+
+    fn play_with_status(
+        &self,
+        kind: Kind,
+        id: i64,
+        content_name: &str,
+        display_title: &str,
+        status: &str,
+    ) {
+        let imp = self.imp();
+        // The favorite target is the CONTENT (series/movie/channel); the
+        // player title may name an episode or trailer within it.
+        *imp.current.borrow_mut() = Some(FavKey {
+            kind,
+            id,
+            name: content_name.to_string(),
+        });
+        *imp.current_status.borrow_mut() = status.to_string();
+        imp.player_page.set_title(display_title);
+        imp.content_title.set_label(display_title);
+        imp.content_status.set_label(status);
+        imp.playing.set(false);
+        self.set_play_icon(false);
+        // The LIVE badge is for live TV only.
+        imp.is_live.set(kind == Kind::Live);
+        imp.live_badge.set_visible(kind == Kind::Live);
+        set_heart_active(&imp.player_heart, self.is_fav(kind, id));
+        imp.on_player.set(true);
+        imp.main_view.push(&*imp.player_page);
+        self.show_controls();
+    }
+
+    /// Trailers are the first real-playback step: playable video URLs run
+    /// through GStreamer inside the player page; YouTube links still need
+    /// a video backend and keep the demo player.
+    fn play_trailer(
+        &self,
+        kind: Kind,
+        id: i64,
+        content_name: &str,
+        label: &str,
+        url: Option<String>,
+    ) {
+        self.play_with_status(
+            kind,
+            id,
+            content_name,
+            &format!("{content_name} — {label}"),
+            "Trailer",
+        );
+        let Some(url) = url else { return };
+        if url.contains("youtube.com") || url.contains("youtu.be") {
+            self.toast("YouTube trailer playback arrives with the video backend — the demo player shows for now");
+            return;
+        }
+        if self.start_playback(&url) {
+            self.imp().playing.set(true);
+            self.set_play_icon(true);
+        } else {
+            self.toast("Real playback is unavailable here — the demo player shows instead");
+        }
+    }
+
+    /// Start real playback for `uri` with GStreamer's playbin, rendering
+    /// into the player page via the GTK4 paintable sink when available.
+    /// Returns whether real playback actually started.
+    fn start_playback(&self, uri: &str) -> bool {
+        let imp = self.imp();
+        self.stop_pipeline();
+
+        if gstreamer::init().is_err() {
+            return false;
+        }
+        let Ok(playbin) = gstreamer::ElementFactory::make("playbin").build() else {
+            return false;
+        };
+        let mut video = false;
+        // The GTK4 paintable sink renders into our own page; without it
+        // (older runtimes, headless GL) the audio still plays while the
+        // demo surface stays up.
+        if let Ok(sink) = gstreamer::ElementFactory::make("gtk4paintablesink").build() {
+            tracing::info!(target: "rtv::play", "video sink: gtk4paintablesink");
+            let paintable = sink.property::<Option<gtk::gdk::Paintable>>("paintable");
+            if let Some(paintable) = paintable {
+                imp.video_surface.set_paintable(Some(&paintable));
+                video = true;
+                playbin.set_property("video-sink", &sink);
+            }
+        }
+        if !video {
+            tracing::warn!(
+                target: "rtv::play",
+                "gtk4paintablesink unavailable — falling back to fakesink (audio only)"
+            );
+            if let Ok(fake) = gstreamer::ElementFactory::make("fakesink").build() {
+                playbin.set_property("video-sink", &fake);
+            }
+        }
+        // The panel origin filters User-Agents (AGENTS.md): playbin's
+        // default soup source presents a generic UA and gets the stream
+        // killed (HTTP 520). Swap in our own souphttpsrc with the app UA
+        // BEFORE the URI is set so the source picks it up.
+        // The panel origin filters User-Agents (AGENTS.md): playbin's
+        // default soup source presents a generic UA and gets the stream
+        // killed (HTTP 520). Configure the UA via the `source-setup`
+        // signal: playbin builds its own source, and its `source`
+        // property is read-only — assigning it panics, and the panic
+        // aborts (no unwind) inside GTK signal callbacks.
+        playbin.connect("source-setup", false, |values| {
+            let source = values[1]
+                .get::<gstreamer::Element>()
+                .expect("source-setup: missing source element");
+            source.set_property("user-agent", crate::xtream::USER_AGENT);
+            None::<gstreamer::glib::Value>
+        });
+        playbin.set_property("uri", uri);
+        playbin.set_property("volume", imp.volume_scale.value());
+        playbin.set_property("mute", imp.muted.get());
+
+        let state_result = playbin.set_state(gstreamer::State::Playing);
+        if let Err(err) = &state_result {
+            tracing::error!(
+                target: "rtv::play",
+                error = %err,
+                "playbin failed to reach PLAYING"
+            );
+        }
+        if state_result.is_err() {
+            let _ = playbin.set_state(gstreamer::State::Null);
+            return false;
+        }
+
+        // Bus events (EOS, errors) are drained on the main loop; the
+        // poller stops itself once the pipeline is torn down. A failing
+        // video sink (headless GL, old runtimes) is retried once without
+        // it — audio keeps playing on the demo surface.
+        if playbin.bus().is_some() {
+            let win = self.downgrade();
+            let retried = Rc::new(std::cell::Cell::new(false));
+            glib::timeout_add_local(std::time::Duration::from_millis(300), move || {
+                let Some(win) = win.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                let Some(pipeline) = win.imp().pipeline.borrow().as_ref().cloned() else {
+                    return glib::ControlFlow::Break;
+                };
+                let Some(bus) = pipeline.bus() else {
+                    return glib::ControlFlow::Break;
+                };
+                let mut stop = false;
+                let mut missing_codec = false;
+                while let Some(message) = bus.timed_pop(gstreamer::ClockTime::from_seconds(0)) {
+                    match message.view() {
+                        gstreamer::MessageView::Eos(..) => stop = true,
+                        gstreamer::MessageView::Element(elem) => {
+                            // gst-plugins-base reports undecodable streams
+                            // as "missing-plugin" element messages; playbin
+                            // keeps running with the audio — surface it
+                            // once instead of stopping the playback.
+                            if elem
+                                .structure()
+                                .map(|s| s.name() == "missing-plugin")
+                                .unwrap_or(false)
+                                && !missing_codec
+                            {
+                                missing_codec = true;
+                                win.toast(
+                                    "Missing codec — video unavailable; install GStreamer decoders (e.g. RPM Fusion gstreamer1-libav)",
+                                );
+                            }
+                        }
+                        gstreamer::MessageView::Error(err) => {
+                            // Log the REAL cause (decoder name, URI, error
+                            // string) — the toast is generic but the log
+                            // tells us exactly which element failed.
+                            tracing::error!(
+                                target: "rtv::play",
+                                source = err.src().map(|s| s.name().to_string()).unwrap_or("?".into()),
+                                error = %err.error(),
+                                debug = %err.debug().unwrap_or_default(),
+                                "playback pipeline error"
+                            );
+                            if missing_codec || retried.get() {
+                                win.toast(
+                                    "Missing codec for this stream — install GStreamer decoders (e.g. RPM Fusion gstreamer1-libav)",
+                                );
+                                stop = true;
+                            } else {
+                                retried.set(true);
+                                let _ = pipeline.set_state(gstreamer::State::Null);
+                                if let Ok(fake) =
+                                    gstreamer::ElementFactory::make("fakesink").build()
+                                {
+                                    pipeline.set_property("video-sink", &fake);
+                                }
+                                let i = win.imp();
+                                i.video_surface.set_paintable(None::<&gtk::gdk::Paintable>);
+                                i.video_surface.set_visible(false);
+                                i.app_watermark.set_visible(true);
+                                if pipeline.set_state(gstreamer::State::Playing).is_ok() {
+                                    win.toast("Video sink unavailable — playing audio only");
+                                    continue;
+                                }
+                                stop = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if stop {
+                    win.stop_pipeline();
+                    glib::ControlFlow::Break
+                } else {
+                    glib::ControlFlow::Continue
+                }
+            });
+        }
+
+        imp.pipeline.replace(Some(playbin));
+        imp.video_surface.set_visible(video);
+        imp.app_watermark.set_visible(!video);
+        if video {
+            self.start_position_ticker();
+        }
+        video
+    }
+
+    /// Start the position ticker: every 500 ms it queries the pipeline's
+    /// position/duration, feeds the scrub bar and the time labels, and
+    /// stops itself when playback pauses/stops or the page pops. The
+    /// generation counter cancels stale tickers without touching
+    /// already-fired source ids.
+    fn start_position_ticker(&self) {
+        let imp = self.imp();
+        let generation = imp.position_generation.get() + 1;
+        imp.position_generation.set(generation);
+        let win = self.downgrade();
+        glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+            let Some(win) = win.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let i = win.imp();
+            if i.position_generation.get() != generation {
+                return glib::ControlFlow::Break;
+            }
+            let Some(pipeline) = i.pipeline.borrow().as_ref().cloned() else {
+                return glib::ControlFlow::Break;
+            };
+            let position = pipeline
+                .query_position::<gstreamer::ClockTime>()
+                .map(|t| t.seconds());
+            let duration = pipeline
+                .query_duration::<gstreamer::ClockTime>()
+                .map(|t| t.seconds());
+            match (position, duration) {
+                (Some(pos), Some(dur)) if dur > 0 => {
+                    i.scrub_row.set_visible(true);
+                    let adj = i.seek_scale.adjustment();
+                    if (adj.upper() as u64) != dur {
+                        adj.set_upper(dur as f64);
+                    }
+                    i.scrub_syncing.set(true);
+                    i.seek_scale.set_value(pos as f64);
+                    i.scrub_syncing.set(false);
+                    i.elapsed_label.set_text(&fmt_clock(pos));
+                    i.duration_label.set_text(&fmt_clock(dur));
+                }
+                _ => {
+                    // Live stream (no duration): the scrubber is
+                    // meaningless, keep it hidden.
+                    i.scrub_row.set_visible(false);
+                }
+            }
+            if i.on_player.get() && i.playing.get() {
+                glib::ControlFlow::Continue
+            } else {
+                glib::ControlFlow::Break
+            }
+        });
+    }
+
+    /// Tear down any active pipeline and return the player to the demo
+    /// surface. Safe to call when nothing is playing.
+    fn stop_pipeline(&self) {
+        let imp = self.imp();
+        imp.position_generation
+            .set(imp.position_generation.get() + 1);
+        if let Some(pipeline) = imp.pipeline.take() {
+            let _ = pipeline.set_state(gstreamer::State::Null);
+            if let Some(bus) = pipeline.bus() {
+                bus.remove_signal_watch();
+            }
+        }
+        imp.video_surface
+            .set_paintable(None::<&gtk::gdk::Paintable>);
+        imp.video_surface.set_visible(false);
+        imp.app_watermark.set_visible(true);
+        imp.scrub_row.set_visible(false);
+        imp.seek_scale.set_value(0.0);
+        imp.elapsed_label.set_text("0:00");
+        if imp.playing.get() {
+            imp.playing.set(false);
+            self.set_play_icon(false);
+        }
+    }
+
+    /// Seek the real pipeline to `seconds`; no-op on the demo player.
+    fn seek_to(&self, seconds: u64) {
+        let pipeline = self.imp().pipeline.borrow().as_ref().cloned();
+        let Some(pipeline) = pipeline else {
+            return;
+        };
+        let _ = pipeline.seek_simple(
+            gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::KEY_UNIT,
+            gstreamer::ClockTime::from_seconds(seconds),
+        );
+    }
+
+    /// Seek the real pipeline by `delta` seconds; a no-op toast on the
+    /// demo player.
+    fn seek_relative(&self, delta: i64) {
+        if self.imp().pipeline.borrow().is_none() {
+            self.toast("Seek 10s (demo)");
+            return;
+        }
+        let pipeline = self.imp().pipeline.borrow().as_ref().cloned();
+        let Some(pipeline) = pipeline else {
+            return;
+        };
+        let position = pipeline.query_position::<gstreamer::ClockTime>();
+        let duration = pipeline.query_duration::<gstreamer::ClockTime>();
+        let (Some(position), Some(duration)) = (position, duration) else {
+            self.toast("Seeking is not available for this stream");
+            return;
+        };
+        let target = if delta >= 0 {
+            (position + gstreamer::ClockTime::from_seconds(delta as u64)).min(duration)
+        } else {
+            position.saturating_sub(gstreamer::ClockTime::from_seconds(delta.unsigned_abs()))
+        };
+        let _ = pipeline.seek(
+            1.0,
+            gstreamer::SeekFlags::FLUSH | gstreamer::SeekFlags::KEY_UNIT,
+            gstreamer::SeekType::Set,
+            target,
+            gstreamer::SeekType::Set,
+            duration,
+        );
+        self.show_controls();
+    }
+
+    /// Open the content detail page for a Series/Movies card. Live cards
+    /// have a play button instead and never reach this. The page body is
+    /// rebuilt on every call; a generation counter neutralizes detail
+    /// fetches that outlive the page they were started for.
+    fn open_details(&self, kind: Kind, id: i64, name: &str) {
+        let imp = self.imp();
+        let catalog = self.catalog();
+        let Some(item) = catalog.item(kind, id) else {
+            return;
+        };
+        imp.details_generation.set(imp.details_generation.get() + 1);
+        let generation = imp.details_generation.get();
+        imp.detail_page.set_title(name);
+        imp.detail_target.replace(Some(FavKey {
+            kind,
+            id,
+            name: name.to_string(),
+        }));
+        set_heart_active(&imp.detail_heart, self.is_fav(kind, id));
+
+        while let Some(child) = imp.detail_content.first_child() {
+            imp.detail_content.remove(&child);
+        }
+
+        match kind {
+            Kind::Live => return,
+            Kind::Series => self.open_series_details(id, name, item.icon.as_deref(), generation),
+            Kind::Vod => self.open_vod_details(
+                id,
+                name,
+                item.rating.clone(),
+                item.year.clone(),
+                item.icon.as_deref(),
+                generation,
+            ),
+        }
+        imp.main_view.push(&*imp.detail_page);
+    }
+
+    /// Series body: offline metadata from series.json on top, seasons list
+    /// filled in by the async get_series_info fetch.
+    fn open_series_details(&self, id: i64, name: &str, cover: Option<&str>, generation: u64) {
+        let imp = self.imp();
+        let meta = self
+            .catalog()
+            .series_meta
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+
+        let ctx = SeriesCtx {
+            id,
+            name: name.to_string(),
+            cover: cover.map(str::to_string).or_else(|| meta.cover.clone()),
+            meta: meta.clone(),
+        };
+
+        let (header, _) = detail_header(name, ctx.cover.as_deref(), &series_meta_lines(&meta));
+        imp.detail_content.append(&header);
+
+        // Rating-source chips sit right below the künye (cover + metadata
+        // block). The score comes from the panel when it carries one —
+        // no internet lookup then — and from the live ratings lookup
+        // (clean title + year) otherwise.
+        let (chips_row, chips) = source_chips_row(name);
+        imp.detail_content.append(&chips_row);
+
+        let panel_rating = meta.rating.clone().filter(|r| r != "0");
+        let year = meta
+            .release_date
+            .as_deref()
+            .map(|d| &d[..4])
+            .map(str::to_string);
+        // Trailers get their own section above Seasons: a series can carry
+        // several of them (even one per season). Their thumbnails pick up
+        // the title's backdrop artwork from the metadata lookup.
+        let trailers: Vec<String> = meta.trailer.clone().into_iter().collect();
+        let trailer_section = trailers_section(self, Kind::Series, id, name, &trailers);
+        if let Some(section) = &trailer_section {
+            imp.detail_content.append(&section.widget);
+        }
+        if let Some(panel) = panel_rating.as_deref() {
+            // The panel carries its own score — never re-fetch it.
+            tracing::info!(
+                target: "rtv::ui",
+                title = %name, score = %panel,
+                "series rating chip: panel score, no lookup"
+            );
+            chips.apply(None, Some(panel));
+        } else {
+            tracing::info!(
+                target: "rtv::ui",
+                title = %name, year = ?year,
+                "series rating chip: no panel score, starting internet lookup"
+            );
+            let name_owned = name.to_string();
+            let name2 = name_owned.clone();
+            let win = self.downgrade();
+            crate::ratings::lookup(Kind::Series, &name_owned, year.as_deref(), move |ratings| {
+                let Some(win) = win.upgrade() else {
+                    return;
+                };
+                if win.imp().details_generation.get() != generation {
+                    return;
+                }
+                tracing::info!(
+                    target: "rtv::ui",
+                    title = %name2,
+                    imdb = ?ratings.as_ref().and_then(|r| r.imdb.clone()),
+                    imdb_id = ?ratings.as_ref().and_then(|r| r.imdb_id.clone()),
+                    "series rating chip: internet lookup done"
+                );
+                chips.apply(ratings.as_ref(), None);
+                if let Some(ratings) = &ratings {
+                    if let Some(section) = &trailer_section {
+                        section.apply_artwork(ratings.backdrop.as_deref());
+                    }
+                }
+            });
+        }
+
+        imp.detail_content.append(&section_title("Seasons"));
+        let seasons_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(6)
+            .build();
+        seasons_box.append(&spinner());
+        imp.detail_content.append(&seasons_box);
+
+        let win = self.downgrade();
+        let seasons_box = seasons_box.clone();
+        let source_id = self.active_source_id();
+        details::series_info(source_id, id, move |result| {
+            let Some(win) = win.upgrade() else {
+                return;
+            };
+            let i = win.imp();
+            if i.details_generation.get() != generation {
+                return;
+            }
+            win.fill_seasons(&seasons_box, result, ctx);
+        });
+    }
+
+    /// Replace the seasons spinner with the season rows (or a graceful
+    /// empty/failure state). Runs on the main loop from the fetch callback.
+    fn fill_seasons(&self, seasons_box: &gtk::Box, result: Option<SeriesInfo>, ctx: SeriesCtx) {
+        while let Some(child) = seasons_box.first_child() {
+            seasons_box.remove(&child);
+        }
+        let Some(info) = result else {
+            self.toast("Could not load series details");
+            seasons_box.append(&dim_label(
+                "Season information could not be loaded. Try again later.",
+            ));
+            return;
+        };
+        if info.seasons.is_empty() {
+            seasons_box.append(&dim_label("No season information available."));
+            return;
+        }
+
+        let list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .activate_on_single_click(true)
+            .css_classes(["boxed-list"])
+            .build();
+        for season in &info.seasons {
+            let count = season.episode_count.or_else(|| {
+                info.episodes
+                    .get(&season.number)
+                    .map(|episodes| episodes.len() as i64)
+            });
+            let title = match count {
+                Some(n) => format!("Season {} ({n})", season.number),
+                None => format!("Season {}", season.number),
+            };
+
+            let row = adw::ActionRow::new();
+            let row_box = gtk::Box::builder()
+                .spacing(12)
+                .margin_top(8)
+                .margin_bottom(8)
+                .margin_start(12)
+                .margin_end(12)
+                .build();
+            if let Some(cover) = &season.cover {
+                row_box.prepend(&cover_art(Some(cover), 40, 60));
+            }
+            row_box.append(
+                &gtk::Label::builder()
+                    .label(title)
+                    .halign(gtk::Align::Start)
+                    .valign(gtk::Align::Center)
+                    .hexpand(true)
+                    .ellipsize(gtk::pango::EllipsizeMode::End)
+                    .build(),
+            );
+            row_box.append(
+                &gtk::Image::builder()
+                    .icon_name("go-next-symbolic")
+                    .css_classes(["dim-label"])
+                    .valign(gtk::Align::Center)
+                    .build(),
+            );
+            if let Some(air_date) = &season.air_date {
+                row_box.append(
+                    &gtk::Label::builder()
+                        .label(air_date)
+                        .css_classes(["caption", "dim-label"])
+                        .valign(gtk::Align::Center)
+                        .build(),
+                );
+            }
+            row.set_child(Some(&row_box));
+            // GtkListBox with selection NONE marks its rows inert: rows
+            // must be explicitly activatable for boxed-list click rows.
+            row.set_activatable(true);
+
+            // Activating a season opens the episodes page: the detail
+            // page's header stays on top, the season's episodes are
+            // listed below.
+            list.append(&row);
+        }
+        // Routed via the list's row-activated signal (the same proven
+        // mechanism as the sidebar): per-row ActionRow "activated" does
+        // not fire reliably in every panel setup.
+        let info = info.clone();
+        let ctx = ctx.clone();
+        let win = self.downgrade();
+        list.connect_row_activated(move |_, row| {
+            if let Some(season) = info.seasons.get(row.index() as usize) {
+                if let Some(win) = win.upgrade() {
+                    win.show_episodes(&info, &ctx, season.number);
+                }
+            }
+        });
+        seasons_box.append(&list);
+    }
+
+    /// Push the episodes page for one season: the detail header (cover,
+    /// title, Key: value metadata) stays on top, the season's episodes
+    /// are listed below.
+    fn show_episodes(&self, info: &SeriesInfo, ctx: &SeriesCtx, season_number: i64) {
+        let imp = self.imp();
+        imp.episodes_page
+            .set_title(&format!("{} · Season {season_number}", ctx.name));
+        while let Some(child) = imp.episodes_content.first_child() {
+            imp.episodes_content.remove(&child);
+        }
+
+        let (header, _) = detail_header(
+            &ctx.name,
+            ctx.cover.as_deref(),
+            &series_meta_lines(&ctx.meta),
+        );
+        imp.episodes_content.append(&header);
+        // Some breathing room before the season heading, like the Play
+        // pill on the movie page.
+        imp.episodes_content.append(
+            &gtk::Label::builder()
+                .label(format!("Season {season_number}"))
+                .halign(gtk::Align::Start)
+                .margin_top(12)
+                .css_classes(["title-3"])
+                .build(),
+        );
+
+        let episodes = info
+            .episodes
+            .get(&season_number)
+            .cloned()
+            .unwrap_or_default();
+        if episodes.is_empty() {
+            // A season listed in seasons[] may have no episode entries.
+            imp.episodes_content
+                .append(&dim_label("No episodes available for this season."));
+            imp.main_view.push(&*imp.episodes_page);
+            return;
+        }
+
+        let list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .activate_on_single_click(true)
+            .css_classes(["boxed-list"])
+            .build();
+        for episode in &episodes {
+            let row = episode_row(episode);
+            // GtkListBox with selection NONE marks its rows inert; the
+            // click routing lives on the list (see below).
+            row.set_activatable(true);
+            list.append(&row);
+        }
+        let episodes = episodes.clone();
+        let ctx = ctx.clone();
+        let win = self.downgrade();
+        list.connect_row_activated(move |_, row| {
+            if let Some(episode) = episodes.get(row.index() as usize) {
+                if let Some(win) = win.upgrade() {
+                    win.play_episode(
+                        ctx.id,
+                        &ctx.name,
+                        season_number,
+                        episode.number,
+                        &episode.title,
+                    );
+                }
+            }
+        });
+        imp.episodes_content.append(&list);
+        imp.main_view.push(&*imp.episodes_page);
+    }
+
+    /// Movie body, laid out like the series page: cover with the Key:
+    /// value details to its right, rating-source chips below the künye,
+    /// a prominent Play button, then trailers (when present). The plot
+    /// renders as the last künye line ("Plot"), under Duration.
+    fn open_vod_details(
+        &self,
+        id: i64,
+        name: &str,
+        panel_rating: Option<String>,
+        year: Option<String>,
+        cover: Option<&str>,
+        generation: u64,
+    ) {
+        let imp = self.imp();
+        let (header, info_col) = detail_header(name, cover, &[]);
+        imp.detail_content.append(&header);
+        info_col.append(&spinner());
+
+        // Rating-source chips sit right below the künye, above Play. The
+        // panel's own score wins when it carries one — no internet lookup
+        // then — otherwise the live ratings lookup (clean title + year)
+        // refines the score and the exact IMDb link in place. The
+        // trailers section arrives with the async vod info, so the
+        // section and the looked up backdrop are shared through slots to
+        // connect them.
+        let (chips_row, chips) = source_chips_row(name);
+        let chips: Rc<SourceChips> = Rc::new(chips);
+        imp.detail_content.append(&chips_row);
+        let trailer_section: Rc<RefCell<Option<TrailerSection>>> = Rc::new(RefCell::new(None));
+        let backdrop: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let panel_rating = panel_rating.filter(|r| r != "0");
+        if let Some(panel) = panel_rating.as_deref() {
+            // The panel carries its own score — never re-fetch it.
+            tracing::info!(
+                target: "rtv::ui",
+                title = %name, score = %panel,
+                "movie rating chip: panel score, no lookup"
+            );
+            chips.apply(None, Some(panel));
+        } else {
+            // No panel score in the catalog: get_vod_info (fetched for
+            // this page anyway) may still carry one — the internet
+            // lookup only starts when the panel has nothing at all.
+            tracing::info!(
+                target: "rtv::ui",
+                title = %name, year = ?year,
+                "movie rating chip: no catalog score, deferring to vod info"
+            );
+        }
+
+        // A little distance from the künye/chips block.
+        let play = gtk::Button::builder()
+            .label("Play")
+            .halign(gtk::Align::Center)
+            .margin_top(18)
+            .css_classes(["suggested-action", "pill"])
+            .build();
+        let win = self.downgrade();
+        let title = name.to_string();
+        play.connect_clicked(move |_| {
+            if let Some(win) = win.upgrade() {
+                win.play(Kind::Vod, id, &title);
+            }
+        });
+        imp.detail_content.append(&play);
+
+        let win = self.downgrade();
+        let info_col = info_col.clone();
+        let title = name.to_string();
+        let trailer_section = trailer_section.clone();
+        let backdrop = backdrop.clone();
+        let chips = chips.clone();
+        let year = year.clone();
+        let source_id = self.active_source_id();
+        details::vod_info(source_id, id, move |result| {
+            let Some(win) = win.upgrade() else {
+                return;
+            };
+            let i = win.imp();
+            if i.details_generation.get() != generation {
+                return;
+            }
+            // Panel-first rating rule, stage 2: with no catalog score,
+            // get_vod_info's own rating (still panel data) wins before
+            // the internet lookup starts.
+            if panel_rating.is_none() {
+                let info_rating = result
+                    .as_ref()
+                    .and_then(|v| v.rating.clone())
+                    .filter(|r| !r.trim().is_empty() && r != "0");
+                match info_rating {
+                    Some(score) => {
+                        tracing::info!(
+                            target: "rtv::ui",
+                            title = %title, score = %score,
+                            "movie rating chip: panel score (vod info), no lookup"
+                        );
+                        chips.apply(None, Some(&score));
+                    }
+                    None => {
+                        tracing::info!(
+                            target: "rtv::ui",
+                            title = %title, year = ?year,
+                            "movie rating chip: panel has no score, starting internet lookup"
+                        );
+                        let win2 = win.downgrade();
+                        let trailer_section = trailer_section.clone();
+                        let backdrop = backdrop.clone();
+                        let chips = chips.clone();
+                        let title2 = title.clone();
+                        let year2 = year.clone();
+                        crate::ratings::lookup(Kind::Vod, &title2, year2.as_deref(), move |ratings| {
+                            let Some(win) = win2.upgrade() else {
+                                return;
+                            };
+                            if win.imp().details_generation.get() != generation {
+                                return;
+                            }
+                            tracing::info!(
+                                target: "rtv::ui",
+                                title = %title2,
+                                imdb = ?ratings.as_ref().and_then(|r| r.imdb.clone()),
+                                imdb_id = ?ratings.as_ref().and_then(|r| r.imdb_id.clone()),
+                                "movie rating chip: internet lookup done"
+                            );
+                            chips.apply(ratings.as_ref(), None);
+                            if let Some(ratings) = &ratings {
+                                *backdrop.borrow_mut() = ratings.backdrop.clone();
+                                if let Some(section) = &*trailer_section.borrow() {
+                                    section.apply_artwork(ratings.backdrop.as_deref());
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+            win.fill_vod_details(id, &title, &info_col, result, &trailer_section, &backdrop);
+        });
+    }
+
+    /// Fill the movie header's info column with the fetched Key: value
+    /// details (the plot is the last line, under Duration) and add the
+    /// trailers section when the panel carries one. The shared slots let
+    /// a metadata backdrop that arrived earlier (or later) reach the
+    /// section either way.
+    fn fill_vod_details(
+        &self,
+        id: i64,
+        name: &str,
+        info_col: &gtk::Box,
+        result: Option<details::VodInfo>,
+        trailer_section: &Rc<RefCell<Option<TrailerSection>>>,
+        backdrop: &Rc<RefCell<Option<String>>>,
+    ) {
+        let imp = self.imp();
+        while let Some(child) = info_col.first_child() {
+            info_col.remove(&child);
+        }
+        let Some(info) = result else {
+            self.toast("Could not load movie details");
+            info_col.append(&dim_label(
+                "Movie details are unavailable right now. Play still works.",
+            ));
+            return;
+        };
+
+        for (key, value) in [
+            info.rating.clone().map(|v| ("Rating", v)),
+            info.genre.map(|v| ("Genre", v)),
+            info.release_date.map(|v| ("Released", v)),
+            info.cast.map(|v| ("Cast", v)),
+            info.director.map(|v| ("Director", v)),
+            info.duration.map(|v| ("Duration", format_duration(&v))),
+            info.plot.map(|v| ("Plot", v)),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            info_col.append(&kv_line(key, &value));
+        }
+
+        // Trailers play in-app like the series ones; any backdrop the
+        // metadata lookup already delivered fills the thumbnails at once.
+        let trailers: Vec<String> = info.trailer.into_iter().collect();
+        let section = trailers_section(self, Kind::Vod, id, name, &trailers);
+        if let Some(section) = &section {
+            imp.detail_content.append(&section.widget);
+            section.apply_artwork(backdrop.borrow().as_deref());
+        }
+        *trailer_section.borrow_mut() = section;
+    }
+
+    fn toggle_playing(&self) {
+        let imp = self.imp();
+        // Real pipeline: pause/resume the stream.
+        if let Some(pipeline) = imp.pipeline.borrow().as_ref() {
+            let target = if imp.playing.get() {
+                gstreamer::State::Paused
+            } else {
+                gstreamer::State::Playing
+            };
+            let _ = pipeline.set_state(target);
+            imp.playing.set(!imp.playing.get());
+            self.set_play_icon(imp.playing.get());
+            self.show_controls();
+            return;
+        }
+        // Demo player (no real stream attached).
+        imp.playing.set(!imp.playing.get());
+        self.set_play_icon(imp.playing.get());
+        let status = imp.current_status.borrow().clone();
+        imp.content_status.set_label(if imp.playing.get() {
+            "Playing (demo)"
+        } else {
+            &status
+        });
+        if imp.playing.get() {
+            self.show_controls();
+        } else {
+            self.cancel_hide();
+            imp.controls_revealer.set_reveal_child(true);
+        }
+    }
+
+    fn set_play_icon(&self, playing: bool) {
+        let icon = if playing {
+            "media-playback-pause-symbolic"
+        } else {
+            "media-playback-start-symbolic"
+        };
+        self.imp().play_button_small.set_icon_name(icon);
+    }
+
+    /// Reveal the control bar; while playing, schedule it to fade away
+    /// again after a short delay (mouse motion or pause re-reveals).
+    /// Stale timers are neutralized by a generation check instead of
+    /// `SourceId::remove`, which panics on already-fired ids.
+    fn show_controls(&self) {
+        let imp = self.imp();
+        let generation = imp.controls_generation.get() + 1;
+        imp.controls_generation.set(generation);
+        imp.controls_revealer.set_reveal_child(true);
+        if self.is_fullscreen() {
+            imp.live_badge.set_visible(imp.is_live.get());
+        }
+        if imp.playing.get() && imp.on_player.get() {
+            let win = self.downgrade();
+            glib::timeout_add_seconds_local(3, move || {
+                if let Some(win) = win.upgrade() {
+                    let i = win.imp();
+                    if i.controls_generation.get() == generation {
+                        i.controls_revealer.set_reveal_child(false);
+                        if win.is_fullscreen() {
+                            i.live_badge.set_visible(false);
+                        }
+                    }
+                }
+                glib::ControlFlow::Break
+            });
+        }
+    }
+
+    /// Invalidate any pending hide timer without touching its SourceId.
+    fn cancel_hide(&self) {
+        let imp = self.imp();
+        imp.controls_generation
+            .set(imp.controls_generation.get() + 1);
+    }
+
+    fn toggle_mute(&self) {
+        let imp = self.imp();
+        imp.muted.set(!imp.muted.get());
+        imp.mute_button.set_icon_name(if imp.muted.get() {
+            "audio-volume-muted-symbolic"
+        } else {
+            "audio-volume-high-symbolic"
+        });
+        if let Some(pipeline) = imp.pipeline.borrow().as_ref() {
+            pipeline.set_property("mute", imp.muted.get());
+        }
+    }
+
+    fn toggle_fullscreen(&self) {
+        if self.is_fullscreen() {
+            self.unfullscreen();
+        } else {
+            self.fullscreen();
+        }
+    }
+}
+
+/// Detail-page header: cover art on the left (click opens a full-size
+/// preview popup), title + stacked "Key: value" lines on the right.
+/// Returns the whole header box and its info column, so async fetches
+/// (movie details) can append more lines later.
+fn detail_header(
+    title: &str,
+    cover: Option<&str>,
+    lines: &[Option<(String, String)>],
+) -> (gtk::Box, gtk::Box) {
+    let box_ = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(18)
+        .build();
+    box_.append(&cover_art(cover, 130, 195));
+
+    let info = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .valign(gtk::Align::Start)
+        .hexpand(true)
+        .build();
+    info.append(
+        &gtk::Label::builder()
+            .label(title)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .xalign(0.0)
+            .halign(gtk::Align::Start)
+            .css_classes(["title-2"])
+            .build(),
+    );
+    for (key, value) in lines.iter().flatten() {
+        info.append(&kv_line(key, value));
+    }
+    box_.append(&info);
+    (box_, info)
+}
+
+/// "Key: value" with the key in bold; values are markup-escaped.
+fn kv_line(key: &str, value: &str) -> gtk::Label {
+    let escaped = glib::markup_escape_text(value);
+    gtk::Label::builder()
+        .use_markup(true)
+        .label(format!("<b>{key}:</b> {escaped}"))
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .xalign(0.0)
+        .halign(gtk::Align::Start)
+        .build()
+}
+
+/// The shared series header lines: Genre, Released, Cast, Director,
+/// episode length and Plot — identical structure to the movie künye.
+fn series_meta_lines(meta: &SeriesMeta) -> Vec<Option<(String, String)>> {
+    [
+        meta.genre.clone().map(|v| ("Genre".to_string(), v)),
+        meta.release_date
+            .clone()
+            .map(|v| ("Released".to_string(), v)),
+        meta.cast.clone().map(|v| ("Cast".to_string(), v)),
+        meta.director.clone().map(|v| ("Director".to_string(), v)),
+        meta.episode_run_time
+            .clone()
+            .map(|v| ("Episode length".to_string(), format!("~{v} min"))),
+        meta.plot.clone().map(|v| ("Plot".to_string(), v)),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// The trailers section plus the thumbnail handles, so the metadata
+/// lookup can hand the rows their artwork afterwards.
+struct TrailerSection {
+    widget: gtk::Box,
+    thumbs: Vec<Rc<ImageCard>>,
+}
+
+impl TrailerSection {
+    fn apply_artwork(&self, backdrop: Option<&str>) {
+        for thumb in &self.thumbs {
+            thumb.load(backdrop);
+        }
+    }
+}
+
+/// Trailers listed as rows with a thumbnail; activating one plays it in
+/// the demo player instead of leaving for a website. Returns None
+/// when there is nothing to list.
+fn trailers_section(
+    win: &Window,
+    kind: Kind,
+    id: i64,
+    title: &str,
+    trailers: &[String],
+) -> Option<TrailerSection> {
+    if trailers.is_empty() {
+        return None;
+    }
+    let section = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .build();
+    section.append(&section_title("Trailers"));
+
+    let list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .activate_on_single_click(true)
+        .css_classes(["boxed-list"])
+        .build();
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut thumbs: Vec<Rc<ImageCard>> = Vec::new();
+    for (index, trailer) in trailers.iter().enumerate() {
+        let row = adw::ActionRow::new();
+        let row_box = gtk::Box::builder()
+            .spacing(12)
+            .margin_top(8)
+            .margin_bottom(8)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+        // Placeholder with a centered play chip; the metadata lookup
+        // fills the row with the title's backdrop artwork afterwards.
+        let thumb = trailer_thumb(64, 36);
+        row_box.append(&thumb.widget);
+        row_box.append(
+            &gtk::Label::builder()
+                .label(if trailers.len() == 1 {
+                    "Trailer".to_string()
+                } else {
+                    format!("Trailer {}", index + 1)
+                })
+                .halign(gtk::Align::Start)
+                .valign(gtk::Align::Center)
+                .hexpand(true)
+                .build(),
+        );
+        row.set_child(Some(&row_box));
+        // GtkListBox with selection NONE marks its rows inert.
+        row.set_activatable(true);
+        list.append(&row);
+        thumbs.push(thumb.clone());
+
+        // The playback heart keeps favoriting the movie/series itself.
+        entries.push((format!("Trailer {}", index + 1), trailer.clone()));
+    }
+    // Routed via the list's row-activated signal (same mechanism as the
+    // sidebar; per-row signals miss inert selection-NONE rows).
+    let content_title = title.to_string();
+    let win = win.downgrade();
+    list.connect_row_activated(move |_, row| {
+        let Some((label, url)) = entries.get(row.index() as usize) else {
+            return;
+        };
+        if let Some(win) = win.upgrade() {
+            win.play_trailer(kind, id, &content_title, label, Some(url.clone()));
+        }
+    });
+    section.append(&list);
+    Some(TrailerSection {
+        widget: section,
+        thumbs,
+    })
+}
+
+/// Seconds → "M:SS" / "H:MM:SS" for the scrubber labels.
+fn fmt_clock(total: u64) -> String {
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let seconds = total % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+/// Cover art box with placeholder + async picture fill (same mechanics as
+/// the content cards). Falls back to the placeholder on any failure. Once
+/// a real image is loaded, clicking it opens a full-size preview popup.
+fn cover_art(url: Option<&str>, width: i32, height: i32) -> gtk::Overlay {
+    let card = ImageCard::new(width, height, Some(("video-display-symbolic", 40)), None);
+    card.load(url);
+    card.widget.clone()
+}
+
+/// Trailer thumbnail: a centered play chip acts as the placeholder; once
+/// the artwork loads, the play chip is only revealed on hover.
+fn trailer_thumb(width: i32, height: i32) -> Rc<ImageCard> {
+    let play = gtk::Image::builder()
+        .icon_name("media-playback-start-symbolic")
+        .pixel_size(20)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .css_classes(["play-chip"])
+        .build();
+    Rc::new(ImageCard::new(width, height, None, Some(play)))
+}
+
+/// Image card shared by every thumbnail on the detail pages: a rounded
+/// `.card` tile, an optional placeholder icon, an optional image that
+/// fades in on load and an optional overlay image revealed by CSS on row
+/// hover. A loaded image gets the pointer cursor and opens the preview
+/// popup on click; failures keep the placeholder (never crash). The image
+/// can also be (re)loaded after construction — trailer rows start with a
+/// placeholder and pick up their artwork from the metadata lookup.
+struct ImageCard {
+    widget: gtk::Overlay,
+    picture: gtk::Picture,
+    hover_reveal: Option<gtk::Image>,
+    loaded: Rc<RefCell<Option<gtk::gdk::Texture>>>,
+}
+
+impl ImageCard {
+    fn new(
+        width: i32,
+        height: i32,
+        placeholder: Option<(&str, i32)>,
+        hover_reveal: Option<gtk::Image>,
+    ) -> Self {
+        let art = gtk::Box::builder()
+            .css_classes(["card"])
+            .width_request(width)
+            .height_request(height)
+            .valign(gtk::Align::Start)
+            .build();
+        let widget = gtk::Overlay::new();
+        widget.set_child(Some(&art));
+        // Clip every layer (picture, placeholders, chips) to the rounded
+        // card, so loaded images never poke past the frame corners.
+        widget.set_overflow(gtk::Overflow::Hidden);
+
+        if let Some((icon, pixel)) = placeholder {
+            widget.add_overlay(
+                &gtk::Image::builder()
+                    .icon_name(icon)
+                    .pixel_size(pixel)
+                    .halign(gtk::Align::Center)
+                    .valign(gtk::Align::Center)
+                    .build(),
+            );
+        }
+
+        let picture = gtk::Picture::builder()
+            .content_fit(gtk::ContentFit::Cover)
+            .width_request(width)
+            .height_request(height)
+            .visible(false)
+            .build();
+        widget.add_overlay(&picture);
+        if let Some(hover) = &hover_reveal {
+            widget.add_overlay(hover);
+        }
+
+        let loaded: Rc<RefCell<Option<gtk::gdk::Texture>>> = std::rc::Rc::new(RefCell::new(None));
+        let click = gtk::GestureClick::new();
+        // Capture phase + explicit claim: the click belongs to the
+        // preview — it must not ALSO activate the surrounding list row.
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        click.connect_pressed({
+            let loaded = loaded.clone();
+            let widget = widget.clone();
+            move |gesture, _, _, _| {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                if let Some(texture) = loaded.borrow().as_ref() {
+                    open_preview(&widget, texture);
+                }
+            }
+        });
+        widget.add_controller(click);
+
+        Self {
+            widget,
+            picture,
+            hover_reveal,
+            loaded,
+        }
+    }
+
+    /// Fetch `url` into the card; failures keep the placeholder.
+    fn load(&self, url: Option<&str>) {
+        let Some(url) = url else {
+            return;
+        };
+        let picture = self.picture.clone();
+        let hover_reveal = self.hover_reveal.clone();
+        let loaded = self.loaded.clone();
+        let widget = self.widget.clone();
+        crate::covers::fetch(url.to_string(), move |path| {
+            if let Some(path) = path {
+                if let Ok(texture) = gtk::gdk::Texture::from_filename(&path) {
+                    loaded.replace(Some(texture.clone()));
+                    picture.set_paintable(Some(&texture));
+                    picture.set_visible(true);
+                    if let Some(hover) = &hover_reveal {
+                        hover.add_css_class("hover-reveal");
+                    }
+                    if let Some(cursor) = gtk::gdk::Cursor::from_name("pointer", None) {
+                        widget.set_cursor(Some(&cursor));
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Full-size image preview popup, sized to the image's aspect ratio and
+/// generously large. Closes via the corner button, Escape or by clicking
+/// anywhere outside it (losing keyboard focus).
+fn open_preview(parent: &impl glib::object::IsA<gtk::Widget>, texture: &gtk::gdk::Texture) {
+    let window = adw::Window::new();
+    if let Some(root) = parent.root().and_downcast::<adw::ApplicationWindow>() {
+        window.set_transient_for(Some(&root));
+    }
+    // Not modal on purpose: a modal grab would swallow the outside
+    // clicks that are supposed to dismiss the preview.
+    window.set_title(Some("Preview"));
+    let (width, height) = preview_size(texture);
+    window.set_default_size(width, height);
+
+    let picture = gtk::Picture::builder()
+        .paintable(texture)
+        .content_fit(gtk::ContentFit::Contain)
+        .hexpand(true)
+        .vexpand(true)
+        .build();
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&picture));
+
+    let close = gtk::Button::builder()
+        .icon_name("window-close-symbolic")
+        .tooltip_text("Close")
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::Start)
+        .margin_top(12)
+        .margin_end(12)
+        .css_classes(["osd", "circular"])
+        .build();
+    close.connect_clicked({
+        let window = window.clone();
+        move |_| window.close()
+    });
+    overlay.add_overlay(&close);
+
+    let keys = gtk::EventControllerKey::new();
+    keys.connect_key_pressed({
+        let window = window.clone();
+        move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape {
+                window.close();
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        }
+    });
+    overlay.add_controller(keys);
+
+    // Clicking anything outside the popup takes focus away from it.
+    window.connect_is_active_notify(|window| {
+        if !window.is_active() {
+            window.close();
+        }
+    });
+
+    window.set_content(Some(&overlay));
+    window.present();
+}
+
+/// Window size for the preview: the image's aspect ratio, scaled into a
+/// generous maximum (it may exceed the app window a little). Tiny
+/// thumbnails are upscaled at most 3x so the window stays reasonable.
+fn preview_size(texture: &gtk::gdk::Texture) -> (i32, i32) {
+    const MAX_W: f64 = 1200.0;
+    const MAX_H: f64 = 800.0;
+    const MAX_UPSCALE: f64 = 3.0;
+    let width = texture.intrinsic_width() as f64;
+    let height = texture.intrinsic_height() as f64;
+    if width <= 0.0 || height <= 0.0 {
+        return (900, 640);
+    }
+    let scale = (MAX_W / width).min(MAX_H / height).min(MAX_UPSCALE);
+    (
+        (width * scale).round() as i32,
+        (height * scale).round() as i32,
+    )
+}
+
+/// Centered spinner used as the placeholder of async-filled sections.
+fn spinner() -> gtk::Spinner {
+    gtk::Spinner::builder()
+        .spinning(true)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .margin_top(12)
+        .margin_bottom(12)
+        .build()
+}
+
+fn dim_label(text: &str) -> gtk::Label {
+    gtk::Label::builder()
+        .label(text)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .xalign(0.0)
+        .halign(gtk::Align::Start)
+        .css_classes(["dim-label"])
+        .build()
+}
+
+/// Bold section heading inside a detail page ("Seasons", "Trailers").
+fn section_title(text: &str) -> gtk::Label {
+    gtk::Label::builder()
+        .label(text)
+        .halign(gtk::Align::Start)
+        .css_classes(["title-3"])
+        .build()
+}
+
+/// The updatable parts of the source chips row: the IMDb chip's score
+/// label and its URL (upgraded to the exact title page once the ratings
+/// lookup resolves the IMDb id). The Rotten Tomatoes and Wikipedia chips
+/// are link-only.
+struct SourceChips {
+    imdb_score: gtk::Label,
+    imdb_url: Rc<RefCell<String>>,
+}
+
+impl SourceChips {
+    /// Apply a ratings lookup result: fill the IMDb score and/or point
+    /// the IMDb chip at the exact title page. When no source provides a
+    /// score, fall back to the panel's own rating; with neither, show
+    /// "N/A" (objective over invented).
+    fn apply(&self, ratings: Option<&crate::ratings::Ratings>, panel: Option<&str>) {
+        match ratings.and_then(|r| r.imdb.as_ref()) {
+            Some(score) => {
+                self.imdb_score.remove_css_class("dim-label");
+                self.imdb_score.set_text(score);
+            }
+            None => match panel {
+                Some(score) => {
+                    self.imdb_score.remove_css_class("dim-label");
+                    self.imdb_score.set_text(score);
+                }
+                None => {
+                    self.imdb_score.add_css_class("dim-label");
+                    self.imdb_score.set_text("N/A");
+                }
+            },
+        }
+        if let Some(id) = ratings.and_then(|r| r.imdb_id.as_ref()) {
+            self.imdb_url
+                .replace(format!("https://www.imdb.com/title/{id}/"));
+        }
+    }
+}
+
+/// "Ying-yang" source chips: the left half names the source, the right
+/// half shows its score — or an external-link arrow when no score is
+/// (yet) available. Activating opens the source in the browser; the IMDb
+/// chip's score/url are updated in place by the ratings lookup.
+fn source_chips_row(title: &str) -> (gtk::Box, SourceChips) {
+    let query = glib::uri_escape_string(title, None::<&str>, false);
+    let row = gtk::Box::builder()
+        .spacing(6)
+        .halign(gtk::Align::Start)
+        .build();
+
+    let imdb_url = Rc::new(RefCell::new(format!(
+        "https://www.imdb.com/find/?q={query}"
+    )));
+    // While the ratings lookup runs, the score half shows a small
+    // placeholder; it settles into the score, the panel's rating or
+    // "N/A" once the lookup lands.
+    let imdb_score = gtk::Label::builder()
+        .label("…")
+        .css_classes(["dim-label"])
+        .build();
+    row.append(&source_chip(
+        "IMDb",
+        imdb_url.clone(),
+        Some(imdb_score.clone()),
+    ));
+    // Link-only chips: no keyless source carries RT ratings (yet) and
+    // Wikipedia carries none at all, so they stay single-label pills.
+    let rotten_url = format!("https://www.rottentomatoes.com/search?search={query}");
+    row.append(&source_chip(
+        "Rotten Tomatoes",
+        Rc::new(RefCell::new(rotten_url)),
+        None,
+    ));
+    let wiki_url = format!("https://en.wikipedia.org/w/index.php?search={query}");
+    row.append(&source_chip(
+        "Wikipedia",
+        Rc::new(RefCell::new(wiki_url)),
+        None,
+    ));
+
+    (
+        row,
+        SourceChips {
+            imdb_score,
+            imdb_url,
+        },
+    )
+}
+
+/// One source chip: source name | right-half label when one exists
+/// (IMDb carries its score there); the URL is kept in a RefCell so an
+/// upgraded link (exact IMDb title) is used when clicked.
+fn source_chip(source: &str, url: Rc<RefCell<String>>, right: Option<gtk::Label>) -> gtk::Button {
+    let content = gtk::Box::builder().spacing(8).build();
+    content.append(
+        &gtk::Label::builder()
+            .label(source)
+            .css_classes(["heading"])
+            .build(),
+    );
+    if let Some(right) = &right {
+        content.append(
+            &gtk::Separator::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .build(),
+        );
+        content.append(right);
+    }
+    let button = gtk::Button::builder()
+        .child(&content)
+        .tooltip_text(format!("Open {source}"))
+        .css_classes(["pill"])
+        .build();
+    button.connect_clicked(move |_| {
+        // gtk_uri_launcher_present would be the modern API; show_uri
+        // still opens the default browser with zero ceremony.
+        #[allow(deprecated)]
+        gtk::show_uri(
+            None::<&gtk::Window>,
+            &url.borrow().clone(),
+            gtk::gdk::CURRENT_TIME,
+        );
+    });
+    button
+}
+
+/// "0:02:06:00" / "0:36:00" panel durations become "2 hours 6 minutes" /
+/// "36 minutes"; anything that does not parse is shown verbatim.
+fn format_duration(raw: &str) -> String {
+    let parts: Vec<u64> = raw
+        .split(':')
+        .map(|p| p.trim().parse::<u64>())
+        .collect::<Result<_, _>>()
+        .unwrap_or_default();
+    // Panels vary: days:hours:minutes:seconds, hours:minutes:seconds or
+    // minutes:seconds.
+    let (hours, minutes) = match parts.as_slice() {
+        [days, hours, minutes, _seconds] => (days * 24 + hours, *minutes),
+        [hours, minutes, _seconds] => (*hours, *minutes),
+        [minutes, _seconds] => (0, *minutes),
+        _ => return raw.to_string(),
+    };
+    let mut phrase: Vec<String> = Vec::new();
+    if hours > 0 {
+        phrase.push(if hours == 1 {
+            "1 hour".to_string()
+        } else {
+            format!("{hours} hours")
+        });
+    }
+    if minutes > 0 {
+        phrase.push(if minutes == 1 {
+            "1 minute".to_string()
+        } else {
+            format!("{minutes} minutes")
+        });
+    }
+    if phrase.is_empty() {
+        "0 minutes".to_string()
+    } else {
+        phrase.join(" ")
+    }
+}
+
+/// One episode row inside the episodes page: thumbnail, title, duration,
+/// container and plot. Activation (playing the episode, favoriting the
+/// parent series) is routed by the surrounding list.
+fn episode_row(episode: &Episode) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    let row_box = gtk::Box::builder()
+        .spacing(12)
+        .margin_top(8)
+        .margin_bottom(8)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    if let Some(image) = &episode.image {
+        row_box.append(&cover_art(Some(image), 64, 36));
+    }
+
+    let text = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(3)
+        .valign(gtk::Align::Center)
+        .hexpand(true)
+        .build();
+    text.append(
+        &gtk::Label::builder()
+            .label(format!("E{} — {}", episode.number, episode.title))
+            .halign(gtk::Align::Start)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build(),
+    );
+    let subtitle = episode.duration.as_deref().map(format_duration);
+    if let Some(subtitle) = subtitle {
+        text.append(
+            &gtk::Label::builder()
+                .label(subtitle)
+                .halign(gtk::Align::Start)
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .css_classes(["caption", "dim-label"])
+                .build(),
+        );
+    }
+    if let Some(plot) = &episode.plot {
+        text.append(
+            &gtk::Label::builder()
+                .label(plot)
+                .wrap(true)
+                .wrap_mode(gtk::pango::WrapMode::WordChar)
+                .xalign(0.0)
+                .halign(gtk::Align::Start)
+                .css_classes(["caption", "dim-label"])
+                .build(),
+        );
+    }
+    row_box.append(&text);
+    row.set_child(Some(&row_box));
+    row
+}
+
+fn content_card(item: &Item, category_label: Option<&str>) -> gtk::FlowBoxChild {
+    card_body(
+        // "Name (year)" — the panel's score never renders in listings.
+        &item.display_name(),
+        item.icon.as_deref(),
+        Some(item.kind),
+        Some(item.id),
+        category_label,
+    )
+}
+
+/// Content card: cover art + title, no overlay chrome — activating the
+/// card itself routes to playback (Live) or the detail page
+/// (Series/Movies). Favorites live on the detail/player pages.
+fn card_body(
+    name: &str,
+    icon: Option<&str>,
+    kind: Option<Kind>,
+    item_id: Option<i64>,
+    category_label: Option<&str>,
+) -> gtk::FlowBoxChild {
+    let art = gtk::Box::builder()
+        .css_classes(["card"])
+        .width_request(150)
+        .height_request(150)
+        .build();
+    let placeholder = gtk::Image::builder()
+        .icon_name("video-display-symbolic")
+        .pixel_size(56)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .build();
+    let picture = gtk::Picture::builder()
+        .content_fit(gtk::ContentFit::Cover)
+        .visible(false)
+        .build();
+
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&art));
+    // Clip every layer (picture, placeholders, chips) to the rounded
+    // card, so loaded images never poke past the frame corners.
+    overlay.set_overflow(gtk::Overflow::Hidden);
+    overlay.add_overlay(&placeholder);
+    overlay.add_overlay(&picture);
+
+    // Cover artwork: fetch-on-demand with a persistent disk cache; the
+    // placeholder stays until the fetch succeeds and on any failure.
+    if let Some(url) = icon {
+        let picture = picture.clone();
+        let placeholder = placeholder.clone();
+        crate::covers::fetch(url.to_string(), move |path| {
+            if let Some(path) = path {
+                if let Ok(texture) = gtk::gdk::Texture::from_filename(&path) {
+                    picture.set_paintable(Some(&texture));
+                    picture.set_visible(true);
+                    placeholder.set_visible(false);
+                }
+            }
+        });
+    }
+
+    let label = gtk::Label::builder()
+        .label(name)
+        .wrap(true)
+        .justify(gtk::Justification::Center)
+        .halign(gtk::Align::Center)
+        .max_width_chars(16)
+        .build();
+    let b = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .build();
+    b.append(&overlay);
+    b.append(&label);
+    if let Some(category) = category_label {
+        b.append(
+            &gtk::Label::builder()
+                .label(category)
+                .wrap(true)
+                .justify(gtk::Justification::Center)
+                .halign(gtk::Align::Center)
+                .max_width_chars(16)
+                .css_classes(["caption", "dim-label"])
+                .build(),
+        );
+    }
+
+    let child = gtk::FlowBoxChild::builder().child(&b).build();
+    // Activation data: the card's content kind, catalog id and title ride
+    // on the FlowBoxChild so child_activated can route Live -> playback
+    // and Series/Movies -> the detail page without re-parsing labels.
+    if let Some(kind) = kind {
+        unsafe {
+            child.set_data(CARD_KIND_KEY, kind as i32);
+        }
+    }
+    if let Some(id) = item_id {
+        unsafe {
+            child.set_data(CARD_ID_KEY, id);
+        }
+    }
+    unsafe {
+        child.set_data(CARD_NAME_KEY, name.to_string());
+    }
+    child
+}
+
+/// FlowBoxChild data keys for the card-activation router.
+const CARD_KIND_KEY: &str = "rtv-item-kind";
+const CARD_ID_KEY: &str = "rtv-item-id";
+const CARD_NAME_KEY: &str = "rtv-item-name";
+
+// `NonNull::get` collides with `TreeModelExtManual::get` from the gtk4
+// prelude; all derefs stay inside a single unsafe block.
+fn card_kind(child: &gtk::FlowBoxChild) -> Option<Kind> {
+    let kind =
+        unsafe { glib::object::ObjectExt::data::<i32>(child, CARD_KIND_KEY).map(|v| *v.as_ref()) }?;
+    Some(match kind {
+        1 => Kind::Live,
+        2 => Kind::Series,
+        _ => Kind::Vod,
+    })
+}
+
+fn card_id(child: &gtk::FlowBoxChild) -> Option<i64> {
+    unsafe { glib::object::ObjectExt::data::<i64>(child, CARD_ID_KEY).map(|v| *v.as_ref()) }
+}
+
+fn card_name(child: &gtk::FlowBoxChild) -> Option<String> {
+    unsafe {
+        glib::object::ObjectExt::data::<String>(child, CARD_NAME_KEY).map(|v| v.as_ref().clone())
+    }
+}
+
+fn set_heart_active(button: &gtk::Button, active: bool) {
+    if active {
+        button.add_css_class("active");
+    } else {
+        button.remove_css_class("active");
+    }
+}

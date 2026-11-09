@@ -107,26 +107,54 @@ template $RtvWindow : Adw.ApplicationWindow {
 
                 Gtk.StackPage {
                   name: "grid";
-                  child: Gtk.ScrolledWindow {
-                    hscrollbar-policy: never;
+                  child: Gtk.Box grid_page {
+                    orientation: vertical;
 
-                    child: Adw.Clamp {
-                      maximum-size: 1000;
+                    /* Sort + filter toolbar (Series/Movies grids only —
+                       hidden for Live TV and while empty). The widgets'
+                       models and handlers live in window.rs. */
+                    Gtk.Box grid_toolbar {
+                      visible: false;
+                      halign: center;
+                      valign: start;
+                      margin-top: 12;
+                      margin-start: 12;
+                      margin-end: 12;
+                      spacing: 8;
 
-                      child: Gtk.FlowBox content_grid {
-                        margin-top: 12;
-                        margin-start: 12;
-                        margin-end: 12;
-                        margin-bottom: 12;
-                        column-spacing: 12;
-                        row-spacing: 12;
-                        min-children-per-line: 3;
-                        max-children-per-line: 5;
-                        activate-on-single-click: true;
-                        selection-mode: none;
-                        valign: start;
+                      Gtk.DropDown sort_dropdown {
+                        tooltip-text: _("Sort order");
+                      }
+
+                      Gtk.MenuButton filter_button {
+                        label: _("Filter");
+                        tooltip-text: _("Filter content");
+                        always-show-arrow: true;
+                      }
+                    }
+
+                    Gtk.ScrolledWindow {
+                      vexpand: true;
+                      hscrollbar-policy: never;
+
+                      child: Adw.Clamp {
+                        maximum-size: 1000;
+
+                        child: Gtk.FlowBox content_grid {
+                          margin-top: 12;
+                          margin-start: 12;
+                          margin-end: 12;
+                          margin-bottom: 12;
+                          column-spacing: 12;
+                          row-spacing: 12;
+                          min-children-per-line: 3;
+                          max-children-per-line: 5;
+                          activate-on-single-click: true;
+                          selection-mode: none;
+                          valign: start;
+                        };
                       };
-                    };
+                    }
                   };
                 }
 

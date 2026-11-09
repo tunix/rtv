@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS items (
     item_id     INTEGER NOT NULL,
     category_id TEXT NOT NULL,
     name        TEXT NOT NULL,
+    year        TEXT,
     icon        TEXT,
     rating      TEXT,
     url         TEXT,
@@ -96,8 +97,8 @@ pub fn write(path: &Path, catalog: &Catalog) -> Result<(), Box<dyn std::error::E
     drop(stmt);
 
     let mut stmt = tx.prepare_cached(
-        "INSERT INTO items (kind, item_id, category_id, name, icon, rating, url)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO items (kind, item_id, category_id, name, year, icon, rating, url)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
     )?;
     for item in &catalog.items {
         stmt.execute((
@@ -105,6 +106,7 @@ pub fn write(path: &Path, catalog: &Catalog) -> Result<(), Box<dyn std::error::E
             item.id,
             &item.category_id,
             &item.name,
+            &item.year,
             &item.icon,
             &item.rating,
             &item.url,
@@ -159,22 +161,62 @@ pub fn read(path: &Path) -> Result<Catalog, Box<dyn std::error::Error>> {
     drop(rows);
     drop(stmt);
 
-    let mut stmt =
-        conn.prepare("SELECT kind, item_id, category_id, name, icon, rating, url FROM items")?;
-    let mut rows = stmt.query([])?;
-    while let Some(row) = rows.next()? {
-        catalog.items.push(Item {
+    // Cache files written by older builds predate the year column —
+    // add it in place; the next ingest backfills the values.
+    let has_year: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('items') WHERE name = 'year'")?
+        .exists([])?;
+    if !has_year {
+        conn.execute_batch("ALTER TABLE items ADD COLUMN year TEXT")?;
+    }
+
+    let mut stmt = conn
+        .prepare("SELECT kind, item_id, category_id, name, year, icon, rating, url FROM items")?;
+    let mut rows: Vec<Item> = Vec::new();
+    let mut rows_iter = stmt.query([])?;
+    while let Some(row) = rows_iter.next()? {
+        rows.push(Item {
             kind: kind_of(row.get(0)?),
             id: row.get(1)?,
             category_id: row.get(2)?,
             name: row.get(3)?,
-            icon: row.get(4)?,
-            rating: row.get(5)?,
-            url: row.get(6)?,
+            year: row.get(4)?,
+            icon: row.get(5)?,
+            rating: row.get(6)?,
+            url: row.get(7)?,
         });
     }
-    drop(rows);
+    drop(rows_iter);
     drop(stmt);
+
+    // Heal catalogs written by pre-parsing builds: their `name` column
+    // holds the panel's RAW decorated title and year/rating are NULL.
+    // Re-run the title parser over those rows so listings, filters and
+    // lookups work without waiting for a re-ingest.
+    let total = rows.len();
+    let mut healed = 0usize;
+    for item in &mut rows {
+        if item.year.is_some() {
+            continue;
+        }
+        let (name, year, rating) = crate::catalog::split_title(&item.name);
+        if year.is_some() {
+            item.name = name;
+            item.year = year;
+            if item.rating.is_none() {
+                item.rating = rating;
+            }
+            healed += 1;
+        }
+    }
+    if healed > 0 {
+        tracing::info!(
+            target: "rtv::store",
+            healed, total,
+            "catalog cache healed with the title parser (old pre-parsing rows)"
+        );
+    }
+    catalog.items = rows;
 
     let mut stmt = conn.prepare(
         "SELECT series_id, plot, genre, cast_list, director, rating, release_date,
@@ -361,6 +403,7 @@ mod tests {
                 id: 1,
                 category_id: "L1".into(),
                 name: "Chan".into(),
+                year: None,
                 icon: Some("http://i".into()),
                 rating: None,
                 url: Some("http://s/1".into()),
@@ -400,6 +443,40 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), first);
         assert!(!path.with_extension("db.tmp").exists());
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn read_heals_rows_written_by_pre_parsing_builds() {
+        // A cache from an older build: raw decorated names in `name`,
+        // year/rating NULL (the pre-parse schema had no year column at
+        // all — the in-place migration leaves it NULL here).
+        let mut old = sample();
+        old.items[0].name = "Fısıltı Adam | 2026 | 6.3".into();
+        old.items[0].year = None;
+        old.items[0].rating = None;
+        let path = tmp_path("heal");
+        write(&path, &old).unwrap();
+
+        let back = read(&path).expect("read");
+        let first = &back.items[0];
+        assert_eq!(first.name, "Fısıltı Adam");
+        assert_eq!(first.year.as_deref(), Some("2026"));
+        assert_eq!(first.rating.as_deref(), Some("6.3"));
+
+        // A second cache with an already-clean name passes through
+        // untouched (no false-positive rewrite).
+        let mut clean = sample();
+        clean.items[0].name = "Plain Movie".into();
+        clean.items[0].year = None;
+        clean.items[0].rating = None;
+        let path2 = tmp_path("heal-clean");
+        write(&path2, &clean).unwrap();
+        let back2 = read(&path2).expect("read");
+        assert_eq!(back2.items[0].name, "Plain Movie");
+        assert_eq!(back2.items[0].year, None);
+        assert_eq!(back2.items[0].rating, None);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+        std::fs::remove_dir_all(path2.parent().unwrap()).ok();
     }
 
     #[test]
